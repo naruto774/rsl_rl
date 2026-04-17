@@ -1,0 +1,124 @@
+# Copyright (c) 2024-2025 Ziqi Fan
+# SPDX-License-Identifier: Apache-2.0
+#
+# rl_config.yaml for rl_real_myrobot.cpp
+# Joint order follows IsaacSim / Policy training convention
+
+myrobot/robot_lab_real:
+  dt: 0.005
+  decimation: 4
+  model_name: "../robot_lab/policy.onnx"
+  num_observations: 72
+  observations: ["ang_vel", "gravity_vec", "commands", "dof_pos", "dof_vel", "actions"]
+  observations_history: []
+  observations_history_priority: "time"
+  clip_obs: 100.0
+
+  clip_actions_lower: [-100.0, -100.0, -100.0,
+                       -100.0, -100.0, -100.0,
+                       -100.0, -100.0, -100.0,
+                       -100.0, -100.0, -100.0,
+                       -100.0, -100.0, -100.0,
+                       -100.0, -100.0, -100.0,
+                       -100.0, -100.0, -100.0]
+  clip_actions_upper: [100.0, 100.0, 100.0,
+                       100.0, 100.0, 100.0,
+                       100.0, 100.0, 100.0,
+                       100.0, 100.0, 100.0,
+                       100.0, 100.0, 100.0,
+                       100.0, 100.0, 100.0,
+                       100.0, 100.0, 100.0]
+
+  rl_kp: [7.79, 7.79, 14.1, 7.79, 7.79, 14.1, 7.79,
+          7.79, 7.79, 7.79, 7.79, 7.79, 7.79, 14.1,
+          14.1, 5.54, 5.54, 4.71, 4.71, 10, 10]
+
+  rl_kd: [0.12, 0.12, 1.48, 0.12, 0.12, 1.48, 0.12,
+          0.12, 0.12, 0.12, 0.12, 0.12, 0.12, 1.48,
+          1.48, 0.5, 0.5, 0.12, 0.12, 0.123, 0.123]
+
+  fixed_kp: [7.79, 7.79, 14.1, 7.79, 7.79, 14.1, 7.79,
+             7.79, 7.79, 7.79, 7.79, 7.79, 7.79, 14.1,
+             14.1, 5.54, 5.54, 4.71, 4.71, 10, 10]
+
+  fixed_kd: [0.3, 0.3, 0.7, 0.3, 0.3, 0.7, 0.3,
+             0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.7,
+             0.7, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3]
+
+  num_of_dofs: 21
+  wheel_indices: []
+
+  # Joint order (IsaacSim convention):
+  #  0: left_hip_pitch       1: right_hip_pitch      2: waist_pitch
+  #  3: left_hip_roll        4: right_hip_roll       5: waist_yaw
+  #  6: left_hip_yaw         7: right_hip_yaw        8: head
+  #  9: left_shoulder_pitch 10: right_shoulder_pitch
+  # 11: left_knee           12: right_knee
+  # 13: left_shoulder_roll  14: right_shoulder_roll
+  # 15: left_ankle_pitch    16: right_ankle_pitch
+  # 17: left_elbow          18: right_elbow
+  # 19: left_ankle_roll     20: right_ankle_roll
+
+  action_scale: [0.25, 0.25,   # 0~1   hip pitch
+                 0.25,         # 2     waist pitch
+                 0.25, 0.25,   # 3~4   hip roll
+                 0.25,         # 5     waist yaw
+                 0.25, 0.25,   # 6~7   hip yaw
+                 0.0,          # 8     head
+                 0.25, 0.25,   # 9~10  shoulder pitch
+                 0.25, 0.25,   # 11~12 knee
+                 0.25, 0.25,   # 13~14 shoulder roll
+                 0.25, 0.25,   # 15~16 ankle pitch
+                 0.25, 0.25,   # 17~18 elbow
+                 0.25, 0.25]   # 19~20 ankle roll
+
+  ang_vel_scale: 0.25
+  dof_pos_scale: 1.0
+  dof_vel_scale: 0.05
+  commands_scale: [1.0, 1.0, 1.0]
+
+  # Yaw hold PD controller (active only during RL control)
+  yaw_hold_enable: true
+  yaw_hold_kp: 0.6
+  yaw_hold_kd: 0.08
+  yaw_hold_max_correction: 0.3
+  yaw_hold_cmd_limit: 0.5
+  yaw_hold_user_cmd_deadband: 0.05
+  yaw_hold_forward_cmd_min: 0.05
+
+  torque_limits: [1.96, 1.96, 2.94, 1.96, 1.96, 2.94, 1.96,
+                  1.96, 1.96, 1.96, 1.96, 1.96, 1.96, 2.94,
+                  2.94, 2.94, 2.94, 1.96, 1.96, 2.94, 2.94]
+
+  default_dof_pos: [-0.3, -0.3, 0.0,           # hip pitch L/R, waist pitch
+                    0.05, -0.05, 0.0,          # hip roll L/R, waist yaw
+                    0.004, -0.004, 0.0,        # hip yaw L/R, head
+                    0.0, 0.0,                  # shoulder pitch L/R
+                    0.5, 0.5,                  # knee L/R
+                    0.0, 0.0,                  # shoulder roll L/R
+                    -0.2, -0.2,                # ankle pitch L/R
+                    0.0, 0.0,                  # elbow L/R
+                    -0.06, 0.06]               # ankle roll L/R
+
+  joint_names: [left_hip_pitch, right_hip_pitch, waist_pitch,
+                left_hip_roll, right_hip_roll, waist_yaw,
+                left_hip_yaw, right_hip_yaw, head,
+                left_shoulder_pitch, right_shoulder_pitch,
+                left_knee, right_knee,
+                left_shoulder_roll, right_shoulder_roll,
+                left_ankle_pitch, right_ankle_pitch,
+                left_elbow, right_elbow,
+                left_ankle_roll, right_ankle_roll]
+
+  joint_controller_names: [left_hip_pitch, right_hip_pitch, waist_pitch,
+                           left_hip_roll, right_hip_roll, waist_yaw,
+                           left_hip_yaw, right_hip_yaw, head,
+                           left_shoulder_pitch, right_shoulder_pitch,
+                           left_knee, right_knee,
+                           left_shoulder_roll, right_shoulder_roll,
+                           left_ankle_pitch, right_ankle_pitch,
+                           left_elbow, right_elbow,
+                           left_ankle_roll, right_ankle_roll]
+
+  # No remapping needed for rl_real_myrobot (Pi uses IsaacSim order directly)
+  joint_mapping: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
