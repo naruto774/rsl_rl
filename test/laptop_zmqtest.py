@@ -23,7 +23,7 @@ import time
 import zmq
 
 
-PING_PAYLOAD = b"p"  # 最小负载；与数据包大小无关的粗测
+PING_PAYLOAD = b"\x00" * 392  # 最小负载；与数据包大小无关的粗测
 
 
 def parse_args() -> argparse.Namespace:
@@ -32,13 +32,13 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--pi-ip",
-        default="192.168.6.132",
+        default="192.168.1.133",
         help="Raspberry Pi LAN IP.",
     )
     p.add_argument(
         "--port",
         type=int,
-        default=5557,
+        default=5556,
         help="REP port on Pi (must match pi_zmqtest.py).",
     )
     p.add_argument(

@@ -85,7 +85,15 @@ RL_Real::RL_Real(int argc, char **argv)
     this->loop_plot->start();
 #endif
 #ifdef CSV_LOGGER
-    this->CSVInit(this->robot_name);
+    // Full-trajectory logger: runs independently of the RL loop, writes
+    // every FSM state (Passive -> GetUp -> RLLocomotion -> GetDown -> ...)
+    // into <policy_dir>/myrobot/trace.csv until the program is killed.
+    // Period 20 ms (50 Hz) is sufficient for offline motion diagnosis and
+    // keeps file size reasonable (~6 MB / hour per 21-DoF robot).
+    this->CSVInitTrace(this->robot_name);
+    this->log_t0 = std::chrono::steady_clock::now();
+    this->loop_log = std::make_shared<LoopFunc>("loop_log", 0.02, std::bind(&RL_Real::LogTick, this));
+    this->loop_log->start();
 #endif
 
     std::cout << LOGGER::INFO << "RL_Real (myrobot) started" << std::endl;
@@ -98,6 +106,9 @@ RL_Real::~RL_Real()
     this->loop_keyboard->shutdown();
     this->loop_control->shutdown();
     this->loop_rl->shutdown();
+#ifdef CSV_LOGGER
+    if (this->loop_log) this->loop_log->shutdown();
+#endif
 #ifdef PLOT
     this->loop_plot->shutdown();
 #endif
@@ -378,20 +389,33 @@ void RL_Real::RunModel()
     this->obs.dof_vel = this->robot_state.motor_state.dq;
 
     this->obs.actions = this->Forward();
+
+    // Sim-to-Real: maintain K frames of clipped action history (newest-first).
+    // This matches IsaacLab's last_action timing: the next observation sees
+    // the action produced at this inference step as a_{t-1}.
+    {
+        const int K = this->params.Get<int>("actions_history_length", 1);
+        this->obs.actions_history.push_front(this->obs.actions);
+        while (static_cast<int>(this->obs.actions_history.size()) > K)
+        {
+            this->obs.actions_history.pop_back();
+        }
+    }
+
     this->ComputeOutput(this->obs.actions, this->output_dof_pos, this->output_dof_vel, this->output_dof_tau);
 
     // DEBUG: Print every 50 iterations (~1 second at 50Hz)
     static int debug_counter = 0;
-    if (++debug_counter % 50 == 0)
-    {
-        auto default_pos = this->params.Get<std::vector<float>>("default_dof_pos");
-        std::cout << "\n[DEBUG] ======== RL Output ========" << std::endl;
-        std::cout << "[DEBUG] obs.dof_pos[0:3]: " << this->obs.dof_pos[0] << ", " << this->obs.dof_pos[1] << ", " << this->obs.dof_pos[2] << std::endl;
-        std::cout << "[DEBUG] default_dof_pos[0:3]: " << default_pos[0] << ", " << default_pos[1] << ", " << default_pos[2] << std::endl;
-        std::cout << "[DEBUG] actions[0:3]: " << this->obs.actions[0] << ", " << this->obs.actions[1] << ", " << this->obs.actions[2] << std::endl;
-        std::cout << "[DEBUG] output_dof_pos[0:3]: " << this->output_dof_pos[0] << ", " << this->output_dof_pos[1] << ", " << this->output_dof_pos[2] << std::endl;
-        std::cout << "[DEBUG] commands (x,y,yaw): " << this->obs.commands[0] << ", " << this->obs.commands[1] << ", " << this->obs.commands[2] << std::endl;
-    }
+    // if (++debug_counter % 50 == 0)
+    // {
+    //     auto default_pos = this->params.Get<std::vector<float>>("default_dof_pos");
+    //     std::cout << "\n[DEBUG] ======== RL Output ========" << std::endl;
+    //     std::cout << "[DEBUG] obs.dof_pos[0:3]: " << this->obs.dof_pos[0] << ", " << this->obs.dof_pos[1] << ", " << this->obs.dof_pos[2] << std::endl;
+    //     std::cout << "[DEBUG] default_dof_pos[0:3]: " << default_pos[0] << ", " << default_pos[1] << ", " << default_pos[2] << std::endl;
+    //     std::cout << "[DEBUG] actions[0:3]: " << this->obs.actions[0] << ", " << this->obs.actions[1] << ", " << this->obs.actions[2] << std::endl;
+    //     std::cout << "[DEBUG] output_dof_pos[0:3]: " << this->output_dof_pos[0] << ", " << this->output_dof_pos[1] << ", " << this->output_dof_pos[2] << std::endl;
+    //     std::cout << "[DEBUG] commands (x,y,yaw): " << this->obs.commands[0] << ", " << this->obs.commands[1] << ", " << this->obs.commands[2] << std::endl;
+    // }
 
     if (!this->output_dof_pos.empty())
     {
@@ -406,10 +430,9 @@ void RL_Real::RunModel()
         output_dof_tau_queue.push(this->output_dof_tau);
     }
 
-#ifdef CSV_LOGGER
-    std::vector<float> tau_est = this->robot_state.motor_state.tau_est;
-    this->CSVLogger(this->output_dof_tau, tau_est, this->obs.dof_pos, this->output_dof_pos, this->obs.dof_vel);
-#endif
+    // Per-step observation logging has been moved to the dedicated
+    // `loop_log` (see LogTick below) so that Passive / GetUp / GetDown are
+    // also recorded. Do not add CSV writes here.
 }
 
 std::vector<float> RL_Real::Forward()
@@ -478,6 +501,52 @@ void RL_Real::CmdvelCallback(
 )
 {
     this->cmd_vel = *msg;
+}
+#endif
+
+#ifdef CSV_LOGGER
+// Full-trajectory tick. Runs at 50 Hz regardless of FSM state.
+// We read `robot_state` (populated by GetState -> ReceiveState at loop_control
+// rate) and `robot_command` (populated by StateController in the same loop),
+// plus the last RL inputs/outputs stored on `this->obs`. In non-RL states
+// `obs.actions` may be empty, which is fine because CSVLoggerTrace zero-pads.
+void RL_Real::LogTick()
+{
+    const float t_sec = std::chrono::duration<float>(
+        std::chrono::steady_clock::now() - this->log_t0).count();
+
+    // FSM state name (e.g. "RLFSMStatePassive", "RLFSMStateRLLocomotion").
+    std::string fsm_state = "Unknown";
+    if (this->fsm.current_state_)
+    {
+        fsm_state = this->fsm.current_state_->GetStateName();
+    }
+
+    // Effective velocity commands (after yaw_hold etc. these are what goes
+    // into the policy; in non-RL states `obs.commands` may be empty so we
+    // fall back to the raw user input).
+    std::vector<float> commands = this->obs.commands;
+    if (commands.size() < 3)
+    {
+        commands = {this->control.x, this->control.y, this->control.yaw};
+    }
+
+    // Joint target actually being written to the low-level PD right now:
+    // this is robot_command.motor_command.q, valid in every FSM state
+    // (Passive holds, GetUp interpolates, RL writes policy output).
+    const std::vector<float>& cmd_q_live = this->robot_command.motor_command.q;
+
+    this->CSVLoggerTrace(
+        t_sec,
+        fsm_state,
+        commands,
+        this->robot_state.imu.gyroscope,
+        this->robot_state.imu.quaternion,
+        this->robot_state.motor_state.q,
+        cmd_q_live,
+        this->robot_state.motor_state.dq,
+        this->obs.actions   // empty in non-RL states, zero-padded by logger
+    );
 }
 #endif
 

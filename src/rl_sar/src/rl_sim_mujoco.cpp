@@ -42,7 +42,7 @@ RL_Sim::RL_Sim(int argc, char **argv)
     // now launch mujoco
     std::cout << LOGGER::INFO << "[MuJoCo] Launching..." << std::endl;
 
-    // display an error if running on macOS under Rosetta 2
+    // 条件编译宏：仅 macOS 下 AVX 指令集才需要 Rosetta 2 支持
 #if defined(__APPLE__) && defined(__AVX__)
     if (rosetta_error_msg)
     {
@@ -51,26 +51,26 @@ RL_Sim::RL_Sim(int argc, char **argv)
     }
 #endif
 
-    // print version, check compatibility
+    // 打印mujoco版本信息，检查兼容性
     std::cout << LOGGER::INFO << "[MuJoCo] Version: " << mj_versionString() << std::endl;
     if (mjVERSION_HEADER != mj_version())
     {
         mju_error("Headers and library have different versions");
     }
 
-    // scan for libraries in the plugin directory to load additional plugins
+    // 扫描插件目录，加载插件
     scanPluginLibraries();
-
+    //mujoco gui 相机
     mjvCamera cam;
     mjv_defaultCamera(&cam);
-
+    //gui 可视化选项
     mjvOption opt;
     mjv_defaultOption(&opt);
-
+    // gui 交互扰动对象
     mjvPerturb pert;
     mjv_defaultPerturb(&pert);
 
-    // simulate object encapsulates the UI
+    //将相机、选项、交互扰动对象传给 mj::Simulate
     sim = std::make_unique<mj::Simulate>(
         std::make_unique<mj::GlfwAdapter>(),
         &cam, &opt, &pert, /* is_passive = */ false);
@@ -111,6 +111,10 @@ RL_Sim::RL_Sim(int argc, char **argv)
 
     // read params from yaml
     this->ReadYaml(this->robot_name, "base.yaml");
+
+    // Sim-to-Real: base.yaml 里没有 action_delay_ms_*，所以这里的采样默认得到 0 = 禁用；
+    // 真正的延时值会在进入 RL 状态（config.yaml 被 InitRL 再次加载后）或 R 键复位时重采。
+    this->ResampleActionDelay();
 
     // auto load FSM by robot_name
     if (FSMManager::GetInstance().IsTypeSupported(this->robot_name))
@@ -155,7 +159,11 @@ RL_Sim::RL_Sim(int argc, char **argv)
     this->loop_plot->start();
 #endif
 #ifdef CSV_LOGGER
-    this->CSVInit(this->robot_name);
+    this->CSVInitTrace(this->robot_name, "trace_sim.csv");
+    this->log_t0 = std::chrono::steady_clock::now();
+    this->loop_log = std::make_shared<LoopFunc>(
+        "loop_log", 0.02, std::bind(&RL_Sim::LogTick, this));
+    this->loop_log->start();
 #endif
 
     std::cout << LOGGER::INFO << "RL_Sim start" << std::endl;
@@ -166,9 +174,6 @@ RL_Sim::RL_Sim(int argc, char **argv)
 
 RL_Sim::~RL_Sim()
 {
-    // Clear static instance pointer
-    instance = nullptr;
-
     this->loop_keyboard->shutdown();
     this->loop_joystick->shutdown();
     this->loop_control->shutdown();
@@ -176,7 +181,50 @@ RL_Sim::~RL_Sim()
 #ifdef PLOT
     this->loop_plot->shutdown();
 #endif
+#ifdef CSV_LOGGER
+    if (this->loop_log) this->loop_log->shutdown();
+#endif
     std::cout << LOGGER::INFO << "RL_Sim exit" << std::endl;
+}
+
+// ============ Sim-to-Real: Action Delay helpers ============
+// 从 yaml 读 [min,max] 范围重采本 episode 延时。区间退化或 max<=0 → 关闭延时。
+void RL_Sim::ResampleActionDelay()
+{
+    const float min_ms = this->params.Get<float>("action_delay_ms_min", 0.0f);
+    const float max_ms = this->params.Get<float>("action_delay_ms_max", 0.0f);
+    if (max_ms <= 0.0f || max_ms < min_ms)
+    {
+        this->current_delay_ms_ = 0.0f;
+        return;
+    }
+    std::uniform_real_distribution<float> dist(min_ms, max_ms);
+    this->current_delay_ms_ = dist(this->delay_rng_);
+    std::cout << LOGGER::INFO << "[Sim-to-Real] Action delay resampled: "
+              << this->current_delay_ms_ << " ms (U[" << min_ms << ", " << max_ms << "])" << std::endl;
+}
+
+void RL_Sim::ClearActionDelayBuffer()
+{
+    std::lock_guard<std::mutex> lk(this->action_delay_mutex_);
+    this->action_delay_buffer_.clear();
+}
+
+// 200Hz 调用：扫一遍暂存的动作，到期的 flush 到 output_dof_*_queue
+// 复杂度 O(n) 但 n 极小（10~20ms 延时 × 50Hz 产出 ≈ 1 条）
+void RL_Sim::DrainActionDelayBuffer()
+{
+    const auto now = std::chrono::steady_clock::now();
+    std::lock_guard<std::mutex> lk(this->action_delay_mutex_);
+    while (!this->action_delay_buffer_.empty()
+           && this->action_delay_buffer_.front().release_time <= now)
+    {
+        auto& front = this->action_delay_buffer_.front();
+        if (!front.dof_pos.empty()) output_dof_pos_queue.push(std::move(front.dof_pos));
+        if (!front.dof_vel.empty()) output_dof_vel_queue.push(std::move(front.dof_vel));
+        if (!front.dof_tau.empty()) output_dof_tau_queue.push(std::move(front.dof_tau));
+        this->action_delay_buffer_.pop_front();
+    }
 }
 
 void RL_Sim::GetState(RobotState<float> *state)
@@ -224,6 +272,9 @@ void RL_Sim::RobotControl()
 
     this->StateController(&this->robot_state, &this->robot_command);
 
+    // Sim-to-Real: 200Hz 节拍里把到期的延时动作 flush 给下游 FSM
+    this->DrainActionDelayBuffer();
+
     if (this->control.current_keyboard == Input::Keyboard::R || this->control.current_gamepad == Input::Gamepad::RB_Y)
     {
         if (this->mj_model && this->mj_data)
@@ -231,6 +282,11 @@ void RL_Sim::RobotControl()
             mj_resetData(this->mj_model, this->mj_data);
             mj_forward(this->mj_model, this->mj_data);
         }
+        // Sim-to-Real: R 键复位视作 new episode，重采延时并清掉上一 episode 的滞留动作
+        this->ResampleActionDelay();
+        this->ClearActionDelayBuffer();
+        // 同时清空动作历史，避免上一 episode 的 a_{t-1..t-K} 污染新 episode 的首步观测
+        this->ClearActionsHistory();
     }
     if (this->control.current_keyboard == Input::Keyboard::Enter || this->control.current_gamepad == Input::Gamepad::RB_X)
     {
@@ -360,11 +416,25 @@ void RL_Sim::RunModel()
     if (!(this->rl_init_done && simulation_running))
     {
         this->yaw_hold_target_initialized = false;
+        this->was_rl_init_done_ = false;  // 状态未激活时重置标志，下次进入时能触发重采
         return;
+    }
+
+    // Sim-to-Real: 首次进入 RL 状态时重采延时（此时 config.yaml 已由 InitRL 加载完毕）
+    if (!this->was_rl_init_done_)
+    {
+        this->was_rl_init_done_ = true;
+        this->ResampleActionDelay();
+        this->ClearActionDelayBuffer();
+        // K 在 InitRL 加载 config.yaml 后才已知，这里再 reset 一次保证 history 容器与 K 对齐
+        this->ClearActionsHistory();
     }
 
     this->episode_length_buf += 1;
     this->obs.ang_vel = this->robot_state.imu.gyroscope;
+    // Sim-to-Real: IMU 陀螺仪白噪声 U(-a,a)，a 典型值 0.3 rad/s
+    AddUniformNoiseInPlace(this->obs.ang_vel, this->params.Get<float>("noise_ang_vel", 0.0f));
+    // base_quat 本身不加噪；projected_gravity 的噪声在 rl_sdk.cpp 投影后注入
     this->obs.base_quat = this->robot_state.imu.quaternion;
 
     float cmd_yaw_final = this->control.yaw;
@@ -405,7 +475,11 @@ void RL_Sim::RunModel()
 
     this->obs.commands = {this->control.x, this->control.y, cmd_yaw_final};
     this->obs.dof_pos = this->robot_state.motor_state.q;
+    // Sim-to-Real: 关节编码器噪声，典型 a≈0.03 rad
+    AddUniformNoiseInPlace(this->obs.dof_pos, this->params.Get<float>("noise_dof_pos", 0.0f));
     this->obs.dof_vel = this->robot_state.motor_state.dq;
+    // Sim-to-Real: 关节速度差分后放大的高频噪声，典型 a≈1.25 rad/s
+    AddUniformNoiseInPlace(this->obs.dof_vel, this->params.Get<float>("noise_dof_vel", 0.0f));
 
 #ifdef RL_MUJOCO_TEST_CSV
         // CSV: base 角速度(体轴 rad/s)、IMU 四元数 [w,x,y,z]、速度指令 [vx,vy,yaw_rate]
@@ -505,27 +579,47 @@ void RL_Sim::RunModel()
     //rl控制
     this->obs.actions = this->Forward();
 
+    // Sim-to-Real: 维护 K 帧动作历史 (newest-first)
+    // 时机对齐 IsaacLab 默认 _apply_action 之前的 self.actions（即 clipped action），
+    // 下一次 ComputeObservation 中 obs.actions_history[0] 即为本步刚产出的 a_t（即 a_{t-1} from next-step's view）
+    {
+        const int K = this->params.Get<int>("actions_history_length", 1);
+        this->obs.actions_history.push_front(this->obs.actions);
+        while (static_cast<int>(this->obs.actions_history.size()) > K)
+        {
+            this->obs.actions_history.pop_back();
+        }
+    }
+
     this->ComputeOutput(this->obs.actions, this->output_dof_pos, this->output_dof_vel, this->output_dof_tau);
-    if (!this->output_dof_pos.empty())
+
+    // ===== Sim-to-Real: Actuator Action Delay =====
+    // 当 current_delay_ms_<=0（未启用）时退化为原有的直接 push 路径，保证行为向后兼容；
+    // 否则把动作带着 release_time 放进延时 FIFO，由 RobotControl 200Hz 负责在到期时 flush。
+    if (this->current_delay_ms_ <= 0.0f)
     {
-        output_dof_pos_queue.push(this->output_dof_pos);
+        if (!this->output_dof_pos.empty()) output_dof_pos_queue.push(this->output_dof_pos);
+        if (!this->output_dof_vel.empty()) output_dof_vel_queue.push(this->output_dof_vel);
+        if (!this->output_dof_tau.empty()) output_dof_tau_queue.push(this->output_dof_tau);
     }
-    if (!this->output_dof_vel.empty())
+    else
     {
-        output_dof_vel_queue.push(this->output_dof_vel);
-    }
-    if (!this->output_dof_tau.empty())
-    {
-        output_dof_tau_queue.push(this->output_dof_tau);
+        DelayedAction d;
+        d.release_time = std::chrono::steady_clock::now()
+                       + std::chrono::microseconds(static_cast<int64_t>(this->current_delay_ms_ * 1000.0f));
+        d.dof_pos = this->output_dof_pos;
+        d.dof_vel = this->output_dof_vel;
+        d.dof_tau = this->output_dof_tau;
+        std::lock_guard<std::mutex> lk(this->action_delay_mutex_);
+        this->action_delay_buffer_.push_back(std::move(d));
     }
 
         // this->TorqueProtect(this->output_dof_tau);
         // this->AttitudeProtect(this->robot_state.imu.quaternion, 75.0f, 75.0f);
 
-#ifdef CSV_LOGGER
-    // CSVLogger 内对力矩列未写入；与 rl_sdk 一致，不传力矩估计与指令力矩。
-    this->CSVLogger({}, {}, this->obs.dof_pos, this->output_dof_pos, this->obs.dof_vel);
-#endif
+    // 注意：trace 数据由独立线程 LogTick() 持续写入 trace_sim.csv，
+    // 这里不再调用旧的 CSVLogger() —— 否则它会用默认精度 + 不同 schema
+    // 把同一个 csv_filename 污染掉（与 LogTick 写入的 4 位定点格式不一致）。
 }
 
 std::vector<float> RL_Sim::Forward()
@@ -593,7 +687,39 @@ void signalHandler(int signum)
         RL_Sim::instance->sim->exitrequest.store(1);
     }
 }
+#ifdef CSV_LOGGER
+void RL_Sim::LogTick()
+{
+    const float t_sec = std::chrono::duration<float>(
+        std::chrono::steady_clock::now() - this->log_t0).count();
 
+    std::string fsm_state = "Unknown";
+    if (this->fsm.current_state_)
+    {
+        fsm_state = this->fsm.current_state_->GetStateName();
+    }
+
+    std::vector<float> commands = this->obs.commands;
+    if (commands.size() < 3)
+    {
+        commands = {this->control.x, this->control.y, this->control.yaw};
+    }
+
+    const std::vector<float>& cmd_q_live = this->robot_command.motor_command.q;
+
+    this->CSVLoggerTrace(
+        t_sec,
+        fsm_state,
+        commands,
+        this->robot_state.imu.gyroscope,
+        this->robot_state.imu.quaternion,
+        this->robot_state.motor_state.q,
+        cmd_q_live,
+        this->robot_state.motor_state.dq,
+        this->obs.actions
+    );
+}
+#endif
 int main(int argc, char **argv)
 {
     signal(SIGINT, signalHandler);

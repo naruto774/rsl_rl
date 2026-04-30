@@ -3,8 +3,11 @@
 
 myrobot/robot_lab:
   model_name: "policy.pt"
-  num_observations: 72
-  observations: ["ang_vel", "gravity_vec", "commands", "dof_pos", "dof_vel", "actions"]
+  # 156 = 3(ang_vel) + 3(gravity_vec) + 3(commands) + 21(dof_pos) + 21(dof_vel) + 21*5(actions_history)
+  # 仅对 actions term 做时间堆叠（actuator delay robustness），其余 obs 维持 1 帧
+  num_observations: 156
+  observations: ["ang_vel", "gravity_vec", "commands", "dof_pos", "dof_vel", "actions_history"]
+  actions_history_length: 5  # K=5，与训练侧 IsaacLab cfg 保持一致；newest-first 拼接 [a_{t-1},...,a_{t-K}]
   observations_history: []  # 0 is the latest observation
   observations_history_priority: "time"  # "time" or "term" priority
   clip_obs: 100.0
@@ -50,18 +53,7 @@ myrobot/robot_lab:
                  0.25, 0.25,  #10~16    ankle pitch
                  0.25, 0.25,  #17~18    elbow
                  0.25, 0.25]  #19~7.79    ankle roll
-  # action_scale: [0, 0,  #0~1      hip pitch
-  #                0,        #2        waist pitch
-  #                0, 0,  #3~4      hip roll
-  #                0,        #5        waist yaw
-  #                0, 0,  #6~7      hip yaw
-  #                0.0,         #8        head                     
-  #                0, 0,  #9~10     shoulder pitch
-  #                0, 0,  #11~12    knee
-  #                0, 0,  #13~14    shoulder roll
-  #                0, 0,  #10~16    ankle pitch
-  #                0, 0,  #17~18    elbow
-  #                0, 0]  #19~7.79    ankle roll
+
   wheel_indices: []
   ang_vel_scale: 0.25
   dof_pos_scale: 1.0
@@ -85,3 +77,18 @@ myrobot/robot_lab:
                     -0.2, -0.2, 0.0, 0.0, -0.06, 0.06]
 
   joint_mapping: [0, 6, 13, 1, 7, 12, 2, 8, 20, 14, 17, 3, 9, 15, 18, 4, 10, 16, 19, 5, 11]
+
+  # ====== Sim-to-Real 域随机化（MuJoCo-only，real 配置无此字段即自动禁用） ======
+  # 噪声模型：o~ = o + ε，ε ~ U(-a, +a)，a 与 obs 同量纲。
+  # 数值与 IsaacLab / unitree_rl_lab 训练配置保持一致：
+  noise_ang_vel: 0.1             # rad/s，IMU 陀螺仪白噪声
+  noise_dof_pos: 0.01            # rad，关节编码器量化/回差
+  noise_dof_vel: 0.05            # rad/s，速度差分放大后的高频噪声
+  noise_projected_gravity: 0.01  # 无量纲，IMU 姿态估计误差（投影后加噪）
+
+  # ====== Actuator Action Delay（per-episode 采样） ======
+  # τ ~ U(min, max) ms；进入 RL 状态 / R 键复位时重采一次，episode 内固定。
+  # 在 200Hz 控制环按时间戳释放，等效 K=round(τ/5ms) ∈ {2,3,4} 控制步。
+  # 设为 0 或留空即禁用。
+  action_delay_ms_min: 0.0
+  action_delay_ms_max: 0.0

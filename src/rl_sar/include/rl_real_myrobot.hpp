@@ -7,7 +7,7 @@
 #define RL_REAL_MYROBOT_HPP
 
 // #define PLOT
-// #define CSV_LOGGER
+#define CSV_LOGGER
 // #define USE_ROS
 
 #include "rl_sdk.hpp"
@@ -68,6 +68,14 @@ private:
     std::shared_ptr<LoopFunc> loop_control;
     std::shared_ptr<LoopFunc> loop_rl;
 
+#ifdef CSV_LOGGER
+    // Dedicated full-trajectory logger: runs from Passive to program kill,
+    // independent of whether the RL policy is active.
+    std::shared_ptr<LoopFunc> loop_log;
+    std::chrono::steady_clock::time_point log_t0;
+    void LogTick();
+#endif
+
 #ifdef PLOT
     std::shared_ptr<LoopFunc> loop_plot;
     const int plot_size = 100;
@@ -80,7 +88,7 @@ private:
     void *zmq_context = nullptr;
     void *zmq_sub = nullptr;      // SUB socket: receive low_state from Pi
     void *zmq_pub = nullptr;      // PUB socket: send low_cmd to Pi
-    std::string zmq_pi_ip = "192.168.6.132";
+    std::string zmq_pi_ip = "192.168.1.133";
     int zmq_state_port = 5555;
     int zmq_cmd_port = 5556;
     std::string zmq_state_topic = "low_state";

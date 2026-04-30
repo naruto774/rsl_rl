@@ -13,9 +13,11 @@
 #include <algorithm>
 #include <tbb/concurrent_queue.h>
 #include <vector>
+#include <deque>
 #include <memory>
 #include <fstream>
 #include <mutex>
+#include <random>
 
 #include <yaml-cpp/yaml.h>
 #include "fsm.hpp"
@@ -24,6 +26,21 @@
 #include "inference_runtime.hpp"
 #include "logger.hpp"
 #include "motion_loader.hpp"
+
+/**
+ * @brief 就地均匀噪声注入（Sim-to-Real 域随机化工具）
+ *        数学模型：o~ = o + ε，ε ~ U(-scale, +scale)
+ *        - scale <= 0 即视为禁用（实物端 yaml 默认 0 即可关闭）
+ *        - thread_local RNG，保证多线程调用安全且互不干扰
+ *        - 物理量纲：调用方保证 scale 与 obs 同量纲（rad/s、rad、无量纲）
+ */
+inline void AddUniformNoiseInPlace(std::vector<float>& v, float scale)
+{
+    if (scale <= 0.0f) return;
+    thread_local std::mt19937 gen{std::random_device{}()};
+    std::uniform_real_distribution<float> dist(-scale, scale);
+    for (auto& x : v) x += dist(gen);
+}
 
 template <typename T>
 struct RobotCommand
@@ -180,6 +197,10 @@ struct Observations
     std::vector<T> dof_pos;
     std::vector<T> dof_vel;
     std::vector<T> actions;
+    // Sim-to-Real: 动作历史 FIFO (newest-first，对齐 IsaacLab 默认行为)
+    // index 0 = a_{t-1}（最近一次 policy 输出，已 clip），index K-1 = a_{t-K}（最旧）
+    // 让策略显式看到自己最近 K 步的指令序列，从而学到对自身延迟动力学的内部模型
+    std::deque<std::vector<T>> actions_history;
 };
 
 class RL
@@ -216,6 +237,10 @@ public:
     void InitRL(std::string robot_config_path);
     void InitJointNum(size_t num_joints);
 
+    // Sim-to-Real: episode 边界（reset / 进入 RL state）调用，清空动作历史避免上 episode 残留污染
+    // K 由 yaml 字段 actions_history_length 决定，缺省即 1（向后兼容旧 policy）
+    void ClearActionsHistory();
+
     // rl functions
     virtual std::vector<float> Forward() = 0;
     std::vector<float> ComputeObservation();
@@ -231,6 +256,36 @@ public:
     std::string csv_filename;
     void CSVInit(std::string robot_name);
     void CSVLogger(const std::vector<float> &torque, const std::vector<float> &tau_est, const std::vector<float> &joint_pos, const std::vector<float> &joint_pos_target, const std::vector<float> &joint_vel);
+    // Dedicated observation logger for sim-to-real gap analysis.
+    // Writes a different file (obs.csv) with a complete obs/action schema and
+    // is size-safe (zero-pads missing fields). Enabled independently of the
+    // legacy CSVLogger above.
+    void CSVInitObs(std::string robot_name);
+    void CSVLoggerObs(int t,
+                      const std::vector<float> &commands,
+                      const std::vector<float> &base_ang_vel,
+                      const std::vector<float> &base_quat,
+                      const std::vector<float> &dof_pos,
+                      const std::vector<float> &dof_pos_target,
+                      const std::vector<float> &dof_vel,
+                      const std::vector<float> &actions);
+
+    // Full-trajectory trace logger.
+    // Runs independently of the RL inference loop: every sample contains the
+    // current FSM state name, so you can slice the csv by state offline
+    // (Passive / GetUp / RLLocomotion / GetDown) and compare against sim
+    // recordings. All vector fields are size-safe (zero-padded).
+    void CSVInitTrace(std::string robot_name,
+        std::string filename = "trace.csv");
+    void CSVLoggerTrace(float t_sec,
+                        const std::string &fsm_state,
+                        const std::vector<float> &commands,
+                        const std::vector<float> &base_ang_vel,
+                        const std::vector<float> &base_quat,
+                        const std::vector<float> &dof_pos,
+                        const std::vector<float> &dof_pos_target,
+                        const std::vector<float> &dof_vel,
+                        const std::vector<float> &actions);
 
     // control
     Control control;

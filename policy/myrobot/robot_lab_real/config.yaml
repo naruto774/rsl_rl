@@ -8,8 +8,11 @@ myrobot/robot_lab_real:
   dt: 0.005
   decimation: 4
   model_name: "../robot_lab/policy.onnx"
+  # 156 = 3(ang_vel) + 3(gravity_vec) + 3(commands) + 21(dof_pos) + 21(dof_vel) + 21*5(actions_history)
+  # Keep real deployment observation space aligned with the IsaacLab policy export.
   num_observations: 72
-  observations: ["ang_vel", "gravity_vec", "commands", "dof_pos", "dof_vel", "actions"]
+  observations: ["ang_vel", "gravity_vec", "commands", "dof_pos", "dof_vel", "actions_history"]
+  actions_history_length: 1
   observations_history: []
   observations_history_priority: "time"
   clip_obs: 100.0

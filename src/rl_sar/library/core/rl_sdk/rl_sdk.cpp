@@ -4,7 +4,7 @@
  */
 
 #include "rl_sdk.hpp"
-
+#include <iomanip>
 void RL::StateController(const RobotState<float>* state, RobotCommand<float>* command)
 {
     auto updateState = [&](std::shared_ptr<FSMState> statePtr)
@@ -87,7 +87,13 @@ std::vector<float> RL::ComputeObservation()
         }
         else if (observation == "gravity_vec")
         {
-            obs_list.push_back(QuatRotateInverse(this->obs.base_quat, this->obs.gravity_vec));
+            // Sim-to-Real: 投影后再加均匀噪声，保证与 IsaacLab 中 projected_gravity 的
+            // 噪声模型一致（U(-a,a)，a≈0.04）。对 base_quat 直接加噪会破坏单位模长，
+            // 并且 0.04 描述的是“投影后分量”的不确定度，不是四元数分量的不确定度。
+            // 实物端 yaml 未配置该字段 → Get(..,0.0f) 默认 0 → 自动禁用。
+            auto proj_g = QuatRotateInverse(this->obs.base_quat, this->obs.gravity_vec);
+            AddUniformNoiseInPlace(proj_g, this->params.Get<float>("noise_projected_gravity", 0.0f));
+            obs_list.push_back(proj_g);
         }
         else if (observation == "commands")
         {
@@ -109,6 +115,43 @@ std::vector<float> RL::ComputeObservation()
         else if (observation == "actions")
         {
             obs_list.push_back(this->obs.actions);
+        }
+        else if (observation == "actions_history")
+        {
+            // Sim-to-Real: 动作历史堆叠（actuator delay robustness）
+            // 数学：将最近 K 步 clipped action 按 newest-first 拼成 K*num_of_dofs 维向量
+            //   o_{actions_history}_t = [a_{t-1}, a_{t-2}, ..., a_{t-K}]
+            // 训练侧（IsaacLab 默认）使用 clipped action（_apply_action 之前的 self.actions），
+            // 与 RL_Sim::RunModel 中 push_front(this->obs.actions) 时机一致（Forward 已含 clip）。
+            const int K = this->params.Get<int>("actions_history_length", 1);
+            const int n = this->params.Get<int>("num_of_dofs");
+            std::vector<float> stacked;
+            stacked.reserve(static_cast<size_t>(K) * static_cast<size_t>(n));
+            for (int k = 0; k < K; ++k)
+            {
+                if (k < static_cast<int>(this->obs.actions_history.size()))
+                {
+                    const auto& a = this->obs.actions_history[k];
+                    // 防御性：若历史帧维度异常，按 num_of_dofs 截断/补零，保证 obs 维度恒定
+                    if (static_cast<int>(a.size()) == n)
+                    {
+                        stacked.insert(stacked.end(), a.begin(), a.end());
+                    }
+                    else
+                    {
+                        std::vector<float> padded(n, 0.0f);
+                        const int copy_n = std::min(static_cast<int>(a.size()), n);
+                        for (int i = 0; i < copy_n; ++i) padded[i] = a[i];
+                        stacked.insert(stacked.end(), padded.begin(), padded.end());
+                    }
+                }
+                else
+                {
+                    // 历史不足 K 帧时按 0 padding（episode 起始 K 步内的暖启动）
+                    stacked.insert(stacked.end(), n, 0.0f);
+                }
+            }
+            obs_list.push_back(stacked);
         }
         // ============= Other Observations =============
         else if (observation == "whole_body_tracking/motion_command")
@@ -194,7 +237,21 @@ void RL::InitObservations()
     this->obs.dof_vel.resize(this->params.Get<int>("num_of_dofs"), 0.0f);
     this->obs.actions.clear();
     this->obs.actions.resize(this->params.Get<int>("num_of_dofs"), 0.0f);
+    // 动作历史按 K 帧零向量初始化，保证首次 ComputeObservation 维度立即就位
+    this->ClearActionsHistory();
     this->ComputeObservation();
+}
+
+void RL::ClearActionsHistory()
+{
+    // K 缺省为 1：旧 policy（observations 含 "actions" 而非 "actions_history"）下退化为单帧，行为不变
+    const int K = this->params.Get<int>("actions_history_length", 1);
+    const int n = this->params.Get<int>("num_of_dofs");
+    this->obs.actions_history.clear();
+    for (int k = 0; k < K; ++k)
+    {
+        this->obs.actions_history.emplace_back(n, 0.0f);
+    }
 }
 
 void RL::InitOutputs()
@@ -502,7 +559,7 @@ void RL::CSVInit(std::string robot_path)
     csv_filename += ".csv";
     std::ofstream file(csv_filename.c_str());
 
-    // for(int i = 0; i < this->params.Get<int>("num_of_dofs"); ++i) { file << "tau_cal_" << i << ","; }
+    // for(int i = 0; i < this->params.Get<int>("num_of_dofs"); ++i) { file << "torque_" << i << ","; }
     // for(int i = 0; i < this->params.Get<int>("num_of_dofs"); ++i) { file << "tau_est_" << i << ","; }
     for(int i = 0; i < this->params.Get<int>("num_of_dofs"); ++i) { file << "joint_pos_" << i << ","; }
     for(int i = 0; i < this->params.Get<int>("num_of_dofs"); ++i) { file << "joint_pos_target_" << i << ","; }
@@ -525,6 +582,134 @@ void RL::CSVLogger(const std::vector<float>& torque, const std::vector<float>& t
 
     file << std::endl;
 
+    file.close();
+}
+
+// ============================================================================
+// Observation CSV logger (for sim-to-real gap analysis)
+// ----------------------------------------------------------------------------
+// Records the full policy pipeline per control step:
+//   [t, cmd(3), base_ang_vel(3), base_quat(4), dof_pos(n), dof_pos_target(n),
+//    dof_vel(n), action(n)]
+// All tensors are written in the IsaacSim / sim joint order (same as obs fed
+// to the network), so the csv can be replayed straight into an offline
+// inference script.
+// Safety: any field shorter than expected is zero-padded; empty vectors are
+// logged as 0.0 rather than crashing.
+// ============================================================================
+static inline void CsvWriteFixed(std::ofstream& f, const std::vector<float>& v, int n)
+{
+    const int have = static_cast<int>(v.size());
+    f << std::fixed << std::setprecision(4);
+    for (int i = 0; i < n; ++i)
+    {
+        f << (i < have ? v[i] : 0.0f) << ",";
+    }
+}
+
+void RL::CSVInitObs(std::string robot_path)
+{
+    csv_filename = std::string(POLICY_DIR) + "/" + robot_path + "/obs.csv";
+    std::ofstream file(csv_filename.c_str());
+
+    const int n = this->params.Get<int>("num_of_dofs");
+
+    file << "t,";
+    file << "cmd_x,cmd_y,cmd_yaw,";
+    file << "base_ang_vel_x,base_ang_vel_y,base_ang_vel_z,";
+    file << "base_quat_w,base_quat_x,base_quat_y,base_quat_z,";
+    for (int i = 0; i < n; ++i) { file << "dof_pos_" << i << ","; }
+    for (int i = 0; i < n; ++i) { file << "dof_pos_target_" << i << ","; }
+    for (int i = 0; i < n; ++i) { file << "dof_vel_" << i << ","; }
+    for (int i = 0; i < n; ++i) { file << "action_" << i << ","; }
+
+    file << std::endl;
+    file.close();
+}
+
+void RL::CSVLoggerObs(
+    int t,
+    const std::vector<float>& commands,
+    const std::vector<float>& base_ang_vel,
+    const std::vector<float>& base_quat,
+    const std::vector<float>& dof_pos,
+    const std::vector<float>& dof_pos_target,
+    const std::vector<float>& dof_vel,
+    const std::vector<float>& actions)
+{
+    std::ofstream file(csv_filename.c_str(), std::ios_base::app);
+
+    const int n = this->params.Get<int>("num_of_dofs");
+
+    file << t << ",";
+    CsvWriteFixed(file, commands, 3);       // cmd_x, cmd_y, cmd_yaw
+    CsvWriteFixed(file, base_ang_vel, 3);   // body-frame or world-frame omega
+    CsvWriteFixed(file, base_quat, 4);      // (w, x, y, z)
+    CsvWriteFixed(file, dof_pos, n);        // actual joint pos
+    CsvWriteFixed(file, dof_pos_target, n); // output sent to low-level PD
+    CsvWriteFixed(file, dof_vel, n);        // actual joint vel
+    CsvWriteFixed(file, actions, n);        // raw policy output (pre-scale)
+
+    file << std::endl;
+    file.close();
+}
+
+// ============================================================================
+// Full-trajectory trace logger
+// ----------------------------------------------------------------------------
+// Writes <policy_dir>/<robot>/trace.csv. Runs from construction to destruction
+// of the RL_Real instance, independent of whether the RL policy is active.
+// Schema (one row per tick):
+//   t_sec, fsm_state, cmd(3), base_ang_vel(3), base_quat(4), dof_pos(n),
+//   dof_pos_target(n), dof_vel(n), action(n)
+// Where `dof_pos_target` is the q_cmd actually being written to low-level PD
+// (GetUp interpolator output, RL policy output, or hold pose in Passive).
+// ============================================================================
+void RL::CSVInitTrace(std::string robot_path, std::string filename)
+{
+    csv_filename = std::string(POLICY_DIR) + "/" + robot_path + "/" + filename;
+    std::ofstream file(csv_filename.c_str());
+
+    const int n = this->params.Get<int>("num_of_dofs");
+
+    file << "t_sec,fsm_state,";
+    file << "cmd_x,cmd_y,cmd_yaw,";
+    file << "base_ang_vel_x,base_ang_vel_y,base_ang_vel_z,";
+    file << "base_quat_w,base_quat_x,base_quat_y,base_quat_z,";
+    for (int i = 0; i < n; ++i) { file << "dof_pos_" << i << ","; }
+    for (int i = 0; i < n; ++i) { file << "dof_pos_target_" << i << ","; }
+    for (int i = 0; i < n; ++i) { file << "dof_vel_" << i << ","; }
+    for (int i = 0; i < n; ++i) { file << "action_" << i << ","; }
+
+    file << std::endl;
+    file.close();
+}
+
+void RL::CSVLoggerTrace(
+    float t_sec,
+    const std::string& fsm_state,
+    const std::vector<float>& commands,
+    const std::vector<float>& base_ang_vel,
+    const std::vector<float>& base_quat,
+    const std::vector<float>& dof_pos,
+    const std::vector<float>& dof_pos_target,
+    const std::vector<float>& dof_vel,
+    const std::vector<float>& actions)
+{
+    std::ofstream file(csv_filename.c_str(), std::ios_base::app);
+    file << std::fixed << std::setprecision(4);  
+    const int n = this->params.Get<int>("num_of_dofs");
+
+    file << t_sec << "," << fsm_state << ",";
+    CsvWriteFixed(file, commands, 3);
+    CsvWriteFixed(file, base_ang_vel, 3);
+    CsvWriteFixed(file, base_quat, 4);
+    CsvWriteFixed(file, dof_pos, n);
+    CsvWriteFixed(file, dof_pos_target, n);
+    CsvWriteFixed(file, dof_vel, n);
+    CsvWriteFixed(file, actions, n);
+
+    file << std::endl;
     file.close();
 }
 

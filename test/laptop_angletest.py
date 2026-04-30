@@ -27,7 +27,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--pi-ip",
-        default="192.168.6.132",
+        default="192.168.1.133",
         help="Raspberry Pi LAN IP (default: 192.168.6.132). Overwritten if provided.",
     )
     parser.add_argument("--port", type=int, default=5555, help="State publisher port on Raspberry Pi")
@@ -140,10 +140,10 @@ def main() -> None:
                 t_cmd = 0.0
                 next_pub_t = time.perf_counter()
                 last_q0_cmd = q0_ref(0.0)
-                csv_writer.writerow([f"{last_q0_cmd:.6f}", f"{float(q[0]):.6f}"])
+                csv_writer.writerow([f"{last_q0_cmd:.6f}", f"{float(q[3]):.6f}"])
                 print("[sub] first low_state: aligned t=0, CSV + publish enabled.")
             else:
-                csv_writer.writerow([f"{last_q0_cmd:.6f}", f"{float(q[0]):.6f}"])
+                csv_writer.writerow([f"{last_q0_cmd:.6f}", f"{float(q[3]):.6f}"])
 
             latency_ms = (time.time() - float(ts)) * 1000.0
             sample_idx += 1

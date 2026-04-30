@@ -180,8 +180,8 @@ CMakeFiles/motion_loader.dir/clean:
 # Target rules for target CMakeFiles/rl_sdk.dir
 
 # All Build rule for target.
-CMakeFiles/rl_sdk.dir/all: CMakeFiles/inference_runtime.dir/all
 CMakeFiles/rl_sdk.dir/all: CMakeFiles/motion_loader.dir/all
+CMakeFiles/rl_sdk.dir/all: CMakeFiles/inference_runtime.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/rl_sdk.dir/build.make CMakeFiles/rl_sdk.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/rl_sdk.dir/build.make CMakeFiles/rl_sdk.dir/build
 	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/elephant/robot/rl_sar/build_mujoco_test/CMakeFiles --progress-num=22,23 "Built target rl_sdk"
@@ -233,10 +233,10 @@ CMakeFiles/observation_buffer.dir/clean:
 # Target rules for target CMakeFiles/rl_real_a1.dir
 
 # All Build rule for target.
+CMakeFiles/rl_real_a1.dir/all: CMakeFiles/motion_loader.dir/all
 CMakeFiles/rl_real_a1.dir/all: CMakeFiles/rl_sdk.dir/all
 CMakeFiles/rl_real_a1.dir/all: CMakeFiles/observation_buffer.dir/all
 CMakeFiles/rl_real_a1.dir/all: CMakeFiles/inference_runtime.dir/all
-CMakeFiles/rl_real_a1.dir/all: CMakeFiles/motion_loader.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/rl_real_a1.dir/build.make CMakeFiles/rl_real_a1.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/rl_real_a1.dir/build.make CMakeFiles/rl_real_a1.dir/build
 	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/elephant/robot/rl_sar/build_mujoco_test/CMakeFiles --progress-num=14,15 "Built target rl_real_a1"
@@ -262,10 +262,10 @@ CMakeFiles/rl_real_a1.dir/clean:
 # Target rules for target CMakeFiles/rl_real_go2.dir
 
 # All Build rule for target.
+CMakeFiles/rl_real_go2.dir/all: CMakeFiles/motion_loader.dir/all
 CMakeFiles/rl_real_go2.dir/all: CMakeFiles/rl_sdk.dir/all
 CMakeFiles/rl_real_go2.dir/all: CMakeFiles/observation_buffer.dir/all
 CMakeFiles/rl_real_go2.dir/all: CMakeFiles/inference_runtime.dir/all
-CMakeFiles/rl_real_go2.dir/all: CMakeFiles/motion_loader.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/rl_real_go2.dir/build.make CMakeFiles/rl_real_go2.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/rl_real_go2.dir/build.make CMakeFiles/rl_real_go2.dir/build
 	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/elephant/robot/rl_sar/build_mujoco_test/CMakeFiles --progress-num=18,19 "Built target rl_real_go2"
@@ -291,10 +291,10 @@ CMakeFiles/rl_real_go2.dir/clean:
 # Target rules for target CMakeFiles/rl_real_g1.dir
 
 # All Build rule for target.
+CMakeFiles/rl_real_g1.dir/all: CMakeFiles/motion_loader.dir/all
 CMakeFiles/rl_real_g1.dir/all: CMakeFiles/rl_sdk.dir/all
 CMakeFiles/rl_real_g1.dir/all: CMakeFiles/observation_buffer.dir/all
 CMakeFiles/rl_real_g1.dir/all: CMakeFiles/inference_runtime.dir/all
-CMakeFiles/rl_real_g1.dir/all: CMakeFiles/motion_loader.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/rl_real_g1.dir/build.make CMakeFiles/rl_real_g1.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/rl_real_g1.dir/build.make CMakeFiles/rl_real_g1.dir/build
 	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/elephant/robot/rl_sar/build_mujoco_test/CMakeFiles --progress-num=16,17 "Built target rl_real_g1"
@@ -320,10 +320,10 @@ CMakeFiles/rl_real_g1.dir/clean:
 # Target rules for target CMakeFiles/rl_real_myrobot.dir
 
 # All Build rule for target.
+CMakeFiles/rl_real_myrobot.dir/all: CMakeFiles/motion_loader.dir/all
 CMakeFiles/rl_real_myrobot.dir/all: CMakeFiles/rl_sdk.dir/all
 CMakeFiles/rl_real_myrobot.dir/all: CMakeFiles/observation_buffer.dir/all
 CMakeFiles/rl_real_myrobot.dir/all: CMakeFiles/inference_runtime.dir/all
-CMakeFiles/rl_real_myrobot.dir/all: CMakeFiles/motion_loader.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/rl_real_myrobot.dir/build.make CMakeFiles/rl_real_myrobot.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/rl_real_myrobot.dir/build.make CMakeFiles/rl_real_myrobot.dir/build
 	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/elephant/robot/rl_sar/build_mujoco_test/CMakeFiles --progress-num=20,21 "Built target rl_real_myrobot"
@@ -349,10 +349,10 @@ CMakeFiles/rl_real_myrobot.dir/clean:
 # Target rules for target CMakeFiles/rl_sim_mujoco.dir
 
 # All Build rule for target.
+CMakeFiles/rl_sim_mujoco.dir/all: CMakeFiles/motion_loader.dir/all
 CMakeFiles/rl_sim_mujoco.dir/all: CMakeFiles/rl_sdk.dir/all
 CMakeFiles/rl_sim_mujoco.dir/all: CMakeFiles/observation_buffer.dir/all
 CMakeFiles/rl_sim_mujoco.dir/all: CMakeFiles/inference_runtime.dir/all
-CMakeFiles/rl_sim_mujoco.dir/all: CMakeFiles/motion_loader.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/rl_sim_mujoco.dir/build.make CMakeFiles/rl_sim_mujoco.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/rl_sim_mujoco.dir/build.make CMakeFiles/rl_sim_mujoco.dir/build
 	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/elephant/robot/rl_sar/build_mujoco_test/CMakeFiles --progress-num=24,25,26,27,28,29,30 "Built target rl_sim_mujoco"
@@ -378,10 +378,10 @@ CMakeFiles/rl_sim_mujoco.dir/clean:
 # Target rules for target CMakeFiles/mujoco_data_collection.dir
 
 # All Build rule for target.
+CMakeFiles/mujoco_data_collection.dir/all: CMakeFiles/motion_loader.dir/all
 CMakeFiles/mujoco_data_collection.dir/all: CMakeFiles/rl_sdk.dir/all
 CMakeFiles/mujoco_data_collection.dir/all: CMakeFiles/observation_buffer.dir/all
 CMakeFiles/mujoco_data_collection.dir/all: CMakeFiles/inference_runtime.dir/all
-CMakeFiles/mujoco_data_collection.dir/all: CMakeFiles/motion_loader.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/mujoco_data_collection.dir/build.make CMakeFiles/mujoco_data_collection.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/mujoco_data_collection.dir/build.make CMakeFiles/mujoco_data_collection.dir/build
 	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/elephant/robot/rl_sar/build_mujoco_test/CMakeFiles --progress-num=5,6,7,8,9,10,11 "Built target mujoco_data_collection"
