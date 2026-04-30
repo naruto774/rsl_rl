@@ -1,0 +1,2 @@
+/usr/bin/ar qc lib/librl_sdk.a CMakeFiles/rl_sdk.dir/library/core/rl_sdk/rl_sdk.cpp.o
+/usr/bin/ranlib lib/librl_sdk.a

@@ -1,0 +1,2 @@
+/usr/bin/ar qc lib/libmotion_loader.a CMakeFiles/motion_loader.dir/library/core/motion_loader/motion_loader.cpp.o
+/usr/bin/ranlib lib/libmotion_loader.a

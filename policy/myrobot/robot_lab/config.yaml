@@ -1,0 +1,87 @@
+# Copyright (c) 7.7924-7.7925 Ziqi Fan
+# SPDX-License-Identifier: Apache-2.0
+
+myrobot/robot_lab:
+  model_name: "policy.pt"
+  num_observations: 72
+  observations: ["ang_vel", "gravity_vec", "commands", "dof_pos", "dof_vel", "actions"]
+  observations_history: []  # 0 is the latest observation
+  observations_history_priority: "time"  # "time" or "term" priority
+  clip_obs: 100.0
+  clip_actions_lower: [-100.0, -100.0, -100.0,
+                       -100.0, -100.0, -100.0,
+                       -100.0, -100.0, -100.0,
+                       -100.0, -100.0, -100.0, 
+                       -100.0, -100.0, -100.0,
+                       -100.0, -100.0, -100.0, 
+                       -100.0, -100.0, -100.0]
+  clip_actions_upper: [100.0, 100.0, 100.0,
+                       100.0, 100.0, 100.0,
+                       100.0, 100.0, 100.0,
+                       100.0, 100.0, 100.0, 
+                       100.0, 100.0, 100.0,
+                       100.0, 100.0, 100.0, 
+                       100.0, 100.0, 100.0]
+  rl_kp: [7.79, 7.79, 14.1, 7.79, 7.79, 14.1, 7.79, 
+          7.79, 7.79, 7.79, 7.79, 7.79, 7.79, 14.1, 
+          14.1, 5.54, 5.54, 4.71, 4.71, 10, 10]
+
+  rl_kd: [0.12, 0.12, 1.48, 0.12, 0.12, 1.48, 0.12, 
+        0.12, 0.12, 0.12, 0.12, 0.12, 0.12, 1.48, 
+        1.48, 0.5, 0.5, 0.12, 0.12, 0.123, 0.123]
+
+  fixed_kp: [7.79, 7.79, 14.1, 7.79, 7.79, 14.1, 7.79, 
+             7.79, 7.79, 7.79, 7.79, 7.79, 7.79, 14.1, 
+             14.1, 5.54, 5.54, 4.71, 4.71, 10, 10]
+
+  fixed_kd: [0.12, 0.12, 1.48, 0.12, 0.12, 1.48, 0.12, 
+        0.12, 0.12, 0.12, 0.12, 0.12, 0.12, 1.48, 
+        1.48, 0.5, 0.5, 0.12, 0.12, 0.123, 0.123]
+  num_of_dofs: 21
+  action_scale: [0.25, 0.25,  #0~1      hip pitch
+                 0.25,        #2        waist pitch
+                 0.25, 0.25,  #3~4      hip roll
+                 0.25,        #5        waist yaw
+                 0.25, 0.25,  #6~7      hip yaw
+                 0.0,         #8        head                     
+                 0.25, 0.25,  #9~10     shoulder pitch
+                 0.25, 0.25,  #11~12    knee
+                 0.25, 0.25,  #13~14    shoulder roll
+                 0.25, 0.25,  #10~16    ankle pitch
+                 0.25, 0.25,  #17~18    elbow
+                 0.25, 0.25]  #19~7.79    ankle roll
+  # action_scale: [0, 0,  #0~1      hip pitch
+  #                0,        #2        waist pitch
+  #                0, 0,  #3~4      hip roll
+  #                0,        #5        waist yaw
+  #                0, 0,  #6~7      hip yaw
+  #                0.0,         #8        head                     
+  #                0, 0,  #9~10     shoulder pitch
+  #                0, 0,  #11~12    knee
+  #                0, 0,  #13~14    shoulder roll
+  #                0, 0,  #10~16    ankle pitch
+  #                0, 0,  #17~18    elbow
+  #                0, 0]  #19~7.79    ankle roll
+  wheel_indices: []
+  ang_vel_scale: 0.25
+  dof_pos_scale: 1.0
+  dof_vel_scale: 0.05
+  commands_scale: [1.0, 1.0, 1.0]
+  yaw_hold_enable: true
+  yaw_hold_kp: 0.6
+  yaw_hold_kd: 0.08
+  yaw_hold_max_correction: 0.3
+  yaw_hold_cmd_limit: 0.5
+  yaw_hold_user_cmd_deadband: 0.05
+  yaw_hold_forward_cmd_min: 0.05
+  rl_blend_duration: 0.2
+  torque_limits: [1.96, 1.96, 2.94, 1.96, 1.96, 2.94, 1.96, 
+                  1.96, 1.96, 1.96, 1.96, 1.96, 1.96, 2.94, 
+                  2.94, 2.94, 2.94, 1.96, 1.96, 2.94, 2.94]
+
+  default_dof_pos: [-0.3, -0.3,0.0, 0.05, -0.05, 0.0, 0.004, -0.004, 
+                    0.0, 0.0, 0.0,
+                    0.5, 0.5, 0.0, 0.0, 
+                    -0.2, -0.2, 0.0, 0.0, -0.06, 0.06]
+
+  joint_mapping: [0, 6, 13, 1, 7, 12, 2, 8, 20, 14, 17, 3, 9, 15, 18, 4, 10, 16, 19, 5, 11]
