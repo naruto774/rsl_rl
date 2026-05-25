@@ -336,7 +336,7 @@ rl_sar_IS_TOP_LEVEL:STATIC=ON
 rl_sar_SOURCE_DIR:STATIC=/home/elephant/robot/rl_sar/src/rl_sar
 
 //Dependencies for the target
-rl_sdk_LIB_DEPENDS:STATIC=general;motion_loader;general;inference_runtime;general;Python3::Python;general;TBB::tbb;
+rl_sdk_LIB_DEPENDS:STATIC=general;motion_loader;general;inference_runtime;general;Python3::Python;general;TBB::tbb;general;mujoco_prebuilt;
 
 //Value Computed by CMake
 unitree_sdk2_BINARY_DIR:STATIC=/home/elephant/robot/rl_sar/build_mujoco_test/library/thirdparty/robot_sdk/unitree/unitree_sdk2
@@ -532,7 +532,7 @@ CMAKE_UNAME:INTERNAL=/usr/bin/uname
 //ADVANCED property for variable: CMAKE_VERBOSE_MAKEFILE
 CMAKE_VERBOSE_MAKEFILE-ADVANCED:INTERNAL=1
 //Details about finding Python3
-FIND_PACKAGE_MESSAGE_DETAILS_Python3:INTERNAL=[/usr/include/python3.10][/usr/lib/python3/dist-packages/numpy/core/include][cfound components: NumPy Interpreter Development.Module ][v3.10.12()]
+FIND_PACKAGE_MESSAGE_DETAILS_Python3:INTERNAL=[/usr/include/python3.10][/home/elephant/.local/lib/python3.10/site-packages/numpy/core/include][cfound components: NumPy Interpreter Development.Module ][v3.10.12()]
 //Details about finding Threads
 FIND_PACKAGE_MESSAGE_DETAILS_Threads:INTERNAL=[TRUE][v()]
 //ADVANCED property for variable: PKG_CONFIG_ARGN
@@ -587,7 +587,7 @@ _Python3_INTERPRETER_SIGNATURE:INTERNAL=b91b4035ecb3bb3f5760d35922531bcd
 _Python3_LIBRARY_RELEASE:INTERNAL=/usr/lib/x86_64-linux-gnu/libpython3.10.so
 _Python3_NUMPY_SIGNATURE:INTERNAL=03637bbc493fe88903739a5129f0293e
 //Path to a file.
-_Python3_NumPy_INCLUDE_DIR:INTERNAL=/usr/lib/python3/dist-packages/numpy/core/include
+_Python3_NumPy_INCLUDE_DIR:INTERNAL=/home/elephant/.local/lib/python3.10/site-packages/numpy/core/include
 __pkg_config_arguments_ZMQ:INTERNAL=QUIET;libzmq
 __pkg_config_checked_ZMQ:INTERNAL=1
 //ADVANCED property for variable: pkgcfg_lib_ZMQ_zmq

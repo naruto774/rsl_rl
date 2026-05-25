@@ -12,6 +12,7 @@
 #include "rl_real_myrobot.hpp"
 #include <chrono>
 #include <ctime>
+#include <yaml-cpp/yaml.h>
 
 static float WrapToPi(float angle)
 {
@@ -283,9 +284,16 @@ void RL_Real::GetState(RobotState<float> *state)
     {
         state->imu.quaternion[i] = state_quat[i];
     }
+
     for (int i = 0; i < 3; ++i)
     {
-        state->imu.gyroscope[i] = state_ang_vel[i];
+        // state->imu.gyroscope[i] = state_ang_vel[i];
+        // x 轴限幅 [-1.5, 1.5]
+        state->imu.gyroscope[0] = std::clamp(state_ang_vel[0], -1.5f, 1.5f);
+        // y 轴限幅 [-0.5, 0.5]
+        state->imu.gyroscope[1] = std::clamp(state_ang_vel[1], -0.5f, 0.5f);
+        // z 轴限幅 [-1.0, 1.0]
+        state->imu.gyroscope[2] = std::clamp(state_ang_vel[2], -1.0f, 1.0f);
     }
 
     // Joint state (no mapping needed - Pi uses IsaacSim order)
@@ -325,6 +333,161 @@ void RL_Real::RobotControl()
     this->control.ClearInput();
 
     this->SetCommand(&this->robot_command);
+}
+
+// 让 loop_rl 与当前 config 的 policy_step_time 对齐。
+// 数学含义：训练时每隔 dt_pol 调用一次 policy 推理，部署侧必须保持同样的采样率，
+// 否则 obs 序列的相位 / 速度估计 / progress 都会偏移训练分布，导致 OOD。
+//   - locomotion (robot_lab_real/base.yaml + robot_lab_real/config.yaml):
+//       base.yaml 设了 dt=0.005, decimation=4 → 20ms (50Hz)
+//   - whole_body_tracking/config.yaml:
+//       policy_step_time=0.01666... → ~16.7ms (60Hz)
+// GetPolicyStepTime() 优先用 config 里的 policy_step_time，没有时回退到 dt*decimation。
+void RL_Real::UpdatePolicyLoopPeriod()
+{
+    if (!this->loop_rl) return;
+    const float period = this->GetPolicyStepTime();
+    this->loop_rl->setPeriod(period);
+    std::cout << LOGGER::INFO << "[PolicyLoop] period=" << period << "s ("
+              << (1.0f / std::max(period, 1e-6f)) << " Hz) for config=" << this->config_name << std::endl;
+}
+
+// 离线 FK 结果加载：把 default_pose_static_ref.yaml 里的 root_z_ref 和
+// 21×3 key_body_pos_rel_flat 读到成员变量。
+//
+// 数学约束：
+//   * yaml 是通过 compute_default_pose_fk.py 在 default_dof_pos 姿态下、
+//     base 朝向 = identity、base z = ROOT_Z_REF 时跑 mj_forward 得到的，
+//     与 rl_sim_mujoco.cpp 中 `xpos[body] - xpos[root]` 的提取逻辑严格一致。
+//   * 顺序：以 policy joint idx 为外层维度，3 维世界系坐标为内层；
+//     这样 RunModel 里可以直接整段拷贝到 obs.key_body_pos_rel，
+//     rl_sdk.cpp 用 key_body_joint_indices 索引 13 个 key body 时取值正确。
+//
+// 加载失败时返回 false，调用方退化为零填充。
+bool RL_Real::LoadDanceStaticRef()
+{
+    const std::string yaml_path = std::string(POLICY_DIR) +
+        "/" + this->robot_name + "/whole_body_tracking/default_pose_static_ref.yaml";
+    const std::string root_key = "myrobot/whole_body_tracking_static_ref";
+
+    YAML::Node root_node;
+    try
+    {
+        root_node = YAML::LoadFile(yaml_path);
+    }
+    catch (const YAML::Exception& e)
+    {
+        std::cout << LOGGER::WARNING
+                  << "[DanceStaticRef] failed to load " << yaml_path
+                  << " : " << e.what() << std::endl;
+        return false;
+    }
+
+    YAML::Node node = root_node[root_key];
+    if (!node)
+    {
+        std::cout << LOGGER::WARNING
+                  << "[DanceStaticRef] yaml missing root key '" << root_key << "'" << std::endl;
+        return false;
+    }
+
+    try
+    {
+        this->dance_root_z_ref = node["root_z_ref"].as<float>();
+        const int expected_dim = this->params.Get<int>("num_of_dofs") * 3;
+        this->dance_key_body_ref.clear();
+        for (const auto& v : node["key_body_pos_rel_flat"])
+        {
+            this->dance_key_body_ref.push_back(v.as<float>());
+        }
+        if (static_cast<int>(this->dance_key_body_ref.size()) != expected_dim)
+        {
+            std::cout << LOGGER::WARNING
+                      << "[DanceStaticRef] key_body_pos_rel_flat size mismatch: got="
+                      << this->dance_key_body_ref.size()
+                      << ", expected=" << expected_dim << std::endl;
+            this->dance_key_body_ref.clear();
+            return false;
+        }
+    }
+    catch (const YAML::Exception& e)
+    {
+        std::cout << LOGGER::WARNING
+                  << "[DanceStaticRef] yaml field parse error: " << e.what() << std::endl;
+        this->dance_key_body_ref.clear();
+        return false;
+    }
+
+    std::cout << LOGGER::INFO
+              << "[DanceStaticRef] loaded root_z_ref=" << this->dance_root_z_ref
+              << ", key_body_pos_rel_flat.size=" << this->dance_key_body_ref.size()
+              << " from " << yaml_path << std::endl;
+    return true;
+}
+
+void RL_Real::OnPolicyConfigLoaded()
+{
+    UpdatePolicyLoopPeriod();
+
+    // 首次切到 whole_body_tracking 时:
+    //   1. 优先尝试在线 FK（rl_sdk 的 LoadFkModel + ComputeKeyBodyPosFK）；
+    //   2. 在线 FK 不可用时回落到离线静态参考 yaml（compute_default_pose_fk.py 产出）；
+    //   3. 两者都失败再退化为零填充，所有 ~40 维 key_body_pos 通道完全 OOD。
+    //   同时打印一个安全告警，让操作者知道当前 obs 完整度。
+    if (this->config_name == "whole_body_tracking" &&
+        this->last_loaded_config_name != "whole_body_tracking")
+    {
+        // 1) 尝试加载在线 FK：用 dance config 的 joint_mapping + MJCF。
+        //    成功后 RunModel 里每周期都会调一次 ComputeKeyBodyPosFK 写 obs.key_body_pos_rel。
+        const std::string mjcf_path = std::string(CMAKE_CURRENT_SOURCE_DIR) +
+            "/../rl_sar_zoo/" + this->robot_name + "_description/mjcf/" +
+            this->robot_name + ".xml";
+        const auto joint_mapping = this->params.Get<std::vector<int>>("joint_mapping");
+        const bool fk_ok = this->LoadFkModel(mjcf_path, joint_mapping, "base_link");
+        this->dance_online_fk_enabled = fk_ok;
+
+        // 2) 加载离线静态参考（兜底，FK 不可用时用）；同时也提供 root_z_ref（实机无 base_pos 估计）
+        this->dance_static_ref_loaded = this->LoadDanceStaticRef();
+
+        std::cout << "\n" << LOGGER::WARNING
+                  << "============================================================" << std::endl;
+        std::cout << LOGGER::WARNING
+                  << "[SafetyCheck] Entering DANCE (whole_body_tracking)." << std::endl;
+        std::cout << LOGGER::WARNING
+                  << "  - Policy uses absolute_position + soft joint pos action," << std::endl;
+        std::cout << LOGGER::WARNING
+                  << "    targets can swing across the full soft joint range." << std::endl;
+        if (this->dance_online_fk_enabled)
+        {
+            std::cout << LOGGER::WARNING
+                      << "  - key_body_pos_rel: ONLINE FK (mj_kinematics on MJCF, tracks" << std::endl;
+            std::cout << LOGGER::WARNING
+                      << "    real-time joint angles + IMU quat). Self-consistent with" << std::endl;
+            std::cout << LOGGER::WARNING
+                      << "    training; residual OOD only on base_pos.z (no z-estimator)." << std::endl;
+        }
+        else if (this->dance_static_ref_loaded)
+        {
+            std::cout << LOGGER::WARNING
+                      << "  - key_body_pos_rel: STATIC reference from offline FK" << std::endl;
+            std::cout << LOGGER::WARNING
+                      << "    (default_pose_static_ref.yaml). Posture-locked, doesn't" << std::endl;
+            std::cout << LOGGER::WARNING
+                      << "    track motion -> partial OOD on these ~40 dims." << std::endl;
+        }
+        else
+        {
+            std::cout << LOGGER::WARNING
+                      << "  - key_body_pos_rel: ZERO-FILLED (FK + static ref both missing)" << std::endl;
+            std::cout << LOGGER::WARNING
+                      << "    -> policy operates strongly OOD on these ~40 dims." << std::endl;
+        }
+        std::cout << LOGGER::WARNING
+                  << "  - Make sure: gantry attached / e-stop in hand / clear area." << std::endl;
+        std::cout << LOGGER::WARNING
+                  << "============================================================\n" << std::endl;
+    }
+    this->last_loaded_config_name = this->config_name;
 }
 
 void RL_Real::RunModel()
@@ -388,6 +551,61 @@ void RL_Real::RunModel()
     this->obs.dof_pos = this->robot_state.motor_state.q;
     this->obs.dof_vel = this->robot_state.motor_state.dq;
 
+    // ----------------------------------------------------------------------
+    // Dance (whole_body_tracking) 专用笛卡尔观测的填充策略，按优先级 fallback:
+    //
+    //   [1] 在线 FK（最佳）: rl_sdk 用 MJCF 跑一次 mj_kinematics，
+    //       输入 = (obs.dof_pos 当前关节角, obs.base_quat 当前 IMU 四元数)，
+    //       输出 = obs.key_body_pos_rel(笛卡尔几何，~10-50μs)。
+    //       与训练侧完全一致的 layout（actuator->joint->body 链）。
+    //
+    //   [2] 离线静态参考: 在线 FK 不可用（USE_MUJOCO 关 / MJCF 加载失败）时，
+    //       用 default_dof_pos 姿态下离线烧的 yaml 常量。policy 一直看到机器人
+    //       保持在 entry pose，~0.1m 量级 OOD。
+    //
+    //   [3] 零填充: 两者都失败时退化为 0，机器人在 root 一点上塌缩，~1m 量级 OOD，
+    //       仅保证不崩。
+    //
+    // root_z 是 base 在世界系 z 坐标，实机没有外部位姿估计，三档都只能用训练标称值
+    // dance_root_z_ref（默认 0.23m），这部分残留 OOD 不可避免。
+    //
+    // 对 locomotion config 这两项不在 observations 列表里，无副作用。
+    if (this->config_name == "whole_body_tracking")
+    {
+        // root_z: 实机没有 base z 估计，统一用训练标称 0.23m（来自静态参考 yaml 或 hard-coded）
+        const float root_z = this->dance_static_ref_loaded
+                             ? this->dance_root_z_ref
+                             : this->params.Get<float>("root_z_ref", 0.23f);
+        this->obs.base_pos = {0.0f, 0.0f, root_z};
+
+        // key_body_pos_rel: 优先在线 FK
+        bool fk_filled = false;
+        if (this->dance_online_fk_enabled && this->IsFkAvailable())
+        {
+            // ComputeKeyBodyPosFK 内部直接读 obs.dof_pos + obs.base_quat、写 obs.key_body_pos_rel
+            fk_filled = this->ComputeKeyBodyPosFK();
+        }
+        if (!fk_filled)
+        {
+            if (this->dance_static_ref_loaded)
+            {
+                this->obs.key_body_pos_rel = this->dance_key_body_ref;
+            }
+            else
+            {
+                this->obs.key_body_pos_rel.assign(
+                    this->params.Get<int>("num_of_dofs") * 3, 0.0f);
+            }
+        }
+    }
+    else
+    {
+        this->obs.base_pos = {0.0f, 0.0f, 0.0f};
+        this->obs.key_body_pos_rel.assign(
+            this->params.Get<int>("num_of_dofs") * 3, 0.0f);
+    }
+    // ----------------------------------------------------------------------
+
     this->obs.actions = this->Forward();
 
     // Sim-to-Real: maintain K frames of clipped action history (newest-first).
@@ -403,6 +621,39 @@ void RL_Real::RunModel()
     }
 
     this->ComputeOutput(this->obs.actions, this->output_dof_pos, this->output_dof_vel, this->output_dof_tau);
+
+    // Dance 状态的实时健康度监控（节流到 ~1Hz 输出，避免淹没终端）：
+    //   mean|action|        :  policy 输出幅度，过小通常意味着归一化没烧进 jit / obs 异常；
+    //                          过大说明 policy 在做剧烈姿态切换，需要确认机械准备就绪。
+    //   mean|q_target-def|  :  实际下发到底层 PD 的目标 - default_dof_pos 的平均绝对偏离，
+    //                          能直接判断"机器人当前是不是真的在跳，还是 hold 在默认位"。
+    if (this->config_name == "whole_body_tracking" && !this->obs.actions.empty())
+    {
+        const int policy_hz = static_cast<int>(std::round(1.0f / std::max(this->GetPolicyStepTime(), 1e-6f)));
+        const int every_n = std::max(1, policy_hz);  // ≈1Hz
+        static int dance_dbg_counter = 0;
+        if (++dance_dbg_counter % every_n == 0)
+        {
+            float mean_abs_action = 0.0f;
+            for (float a : this->obs.actions) mean_abs_action += std::fabs(a);
+            mean_abs_action /= static_cast<float>(this->obs.actions.size());
+
+            float mean_abs_q_delta = 0.0f;
+            const auto default_q = this->params.Get<std::vector<float>>("default_dof_pos");
+            const size_t n = std::min(this->output_dof_pos.size(), default_q.size());
+            for (size_t i = 0; i < n; ++i)
+            {
+                mean_abs_q_delta += std::fabs(this->output_dof_pos[i] - default_q[i]);
+            }
+            if (n > 0) mean_abs_q_delta /= static_cast<float>(n);
+
+            std::cout << "\n" << LOGGER::INFO
+                      << "[DanceMonitor] mean|action|=" << mean_abs_action
+                      << " mean|q_target-default|=" << mean_abs_q_delta
+                      << " ep_step=" << this->episode_length_buf
+                      << std::endl;
+        }
+    }
 
     // DEBUG: Print every 50 iterations (~1 second at 50Hz)
     static int debug_counter = 0;
@@ -535,6 +786,8 @@ void RL_Real::LogTick()
     // this is robot_command.motor_command.q, valid in every FSM state
     // (Passive holds, GetUp interpolates, RL writes policy output).
     const std::vector<float>& cmd_q_live = this->robot_command.motor_command.q;
+    const std::vector<float> projected_gravity =
+        QuatRotateInverse(this->robot_state.imu.quaternion, std::vector<float>{0.0f, 0.0f, -1.0f});
 
     this->CSVLoggerTrace(
         t_sec,
@@ -542,9 +795,11 @@ void RL_Real::LogTick()
         commands,
         this->robot_state.imu.gyroscope,
         this->robot_state.imu.quaternion,
+        projected_gravity,
         this->robot_state.motor_state.q,
         cmd_q_live,
         this->robot_state.motor_state.dq,
+        this->output_dof_delta,
         this->obs.actions   // empty in non-RL states, zero-padded by logger
     );
 }

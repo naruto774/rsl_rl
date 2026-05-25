@@ -18,5 +18,4 @@
 #include "fsm_lite3.hpp"
 #include "fsm_tita.hpp"
 #include "fsm_myrobot.hpp"
-#include "fsm_myg1.hpp"
 #endif // FSM_ALL_HPP

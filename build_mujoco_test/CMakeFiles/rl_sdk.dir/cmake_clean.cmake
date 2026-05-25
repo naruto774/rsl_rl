@@ -1,4 +1,6 @@
 file(REMOVE_RECURSE
+  "CMakeFiles/rl_sdk.dir/library/core/kinematics/kinematics_fk.cpp.o"
+  "CMakeFiles/rl_sdk.dir/library/core/kinematics/kinematics_fk.cpp.o.d"
   "CMakeFiles/rl_sdk.dir/library/core/rl_sdk/rl_sdk.cpp.o"
   "CMakeFiles/rl_sdk.dir/library/core/rl_sdk/rl_sdk.cpp.o.d"
   "lib/librl_sdk.a"

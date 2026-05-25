@@ -315,6 +315,30 @@ library/core/inference_runtime/inference_runtime.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/inference_runtime.dir/build.make CMakeFiles/inference_runtime.dir/library/core/inference_runtime/inference_runtime.cpp.s
 .PHONY : library/core/inference_runtime/inference_runtime.cpp.s
 
+library/core/kinematics/kinematics_fk.o: library/core/kinematics/kinematics_fk.cpp.o
+.PHONY : library/core/kinematics/kinematics_fk.o
+
+# target to build an object file
+library/core/kinematics/kinematics_fk.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/rl_sdk.dir/build.make CMakeFiles/rl_sdk.dir/library/core/kinematics/kinematics_fk.cpp.o
+.PHONY : library/core/kinematics/kinematics_fk.cpp.o
+
+library/core/kinematics/kinematics_fk.i: library/core/kinematics/kinematics_fk.cpp.i
+.PHONY : library/core/kinematics/kinematics_fk.i
+
+# target to preprocess a source file
+library/core/kinematics/kinematics_fk.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/rl_sdk.dir/build.make CMakeFiles/rl_sdk.dir/library/core/kinematics/kinematics_fk.cpp.i
+.PHONY : library/core/kinematics/kinematics_fk.cpp.i
+
+library/core/kinematics/kinematics_fk.s: library/core/kinematics/kinematics_fk.cpp.s
+.PHONY : library/core/kinematics/kinematics_fk.s
+
+# target to generate assembly for a file
+library/core/kinematics/kinematics_fk.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/rl_sdk.dir/build.make CMakeFiles/rl_sdk.dir/library/core/kinematics/kinematics_fk.cpp.s
+.PHONY : library/core/kinematics/kinematics_fk.cpp.s
+
 library/core/motion_loader/motion_loader.o: library/core/motion_loader/motion_loader.cpp.o
 .PHONY : library/core/motion_loader/motion_loader.o
 
@@ -691,6 +715,9 @@ help:
 	@echo "... library/core/inference_runtime/inference_runtime.o"
 	@echo "... library/core/inference_runtime/inference_runtime.i"
 	@echo "... library/core/inference_runtime/inference_runtime.s"
+	@echo "... library/core/kinematics/kinematics_fk.o"
+	@echo "... library/core/kinematics/kinematics_fk.i"
+	@echo "... library/core/kinematics/kinematics_fk.s"
 	@echo "... library/core/motion_loader/motion_loader.o"
 	@echo "... library/core/motion_loader/motion_loader.i"
 	@echo "... library/core/motion_loader/motion_loader.s"

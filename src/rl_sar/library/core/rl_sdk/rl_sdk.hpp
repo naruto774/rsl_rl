@@ -27,6 +27,10 @@
 #include "logger.hpp"
 #include "motion_loader.hpp"
 
+// Forward declare 让 RL 基类可以持有 unique_ptr<KinematicsFK>，
+// 但不污染 rl_sdk.hpp 的所有用户（kinematics_fk.hpp 是 mujoco 相关，单独条件编译）。
+class KinematicsFK;
+
 /**
  * @brief 就地均匀噪声注入（Sim-to-Real 域随机化工具）
  *        数学模型：o~ = o + ε，ε ~ U(-scale, +scale)
@@ -75,6 +79,10 @@ struct RobotState
         std::vector<T> gyroscope = {0.0f, 0.0f, 0.0f};
         std::vector<T> accelerometer = {0.0f, 0.0f, 0.0f};
     } imu;
+
+    // Base position in world frame [x, y, z].
+    // Real-robot backends may leave this as zeros when unavailable.
+    std::vector<T> base_pos = {0.0f, 0.0f, 0.0f};
 
     struct MotorState
     {
@@ -194,11 +202,15 @@ struct Observations
     std::vector<T> gravity_vec;
     std::vector<T> commands;
     std::vector<T> base_quat;
+    // Base position in world frame [x, y, z].
+    std::vector<T> base_pos;
     std::vector<T> dof_pos;
     std::vector<T> dof_vel;
+    // Flattened key-body position relative to root: [joint0_xyz, joint1_xyz, ...] in training joint order.
+    std::vector<T> key_body_pos_rel;
     std::vector<T> actions;
-    // Sim-to-Real: 动作历史 FIFO (newest-first，对齐 IsaacLab 默认行为)
-    // index 0 = a_{t-1}（最近一次 policy 输出，已 clip），index K-1 = a_{t-K}（最旧）
+    // Sim-to-Real: 动作历史 FIFO（内部 newest-first，ComputeObservation 反向展开给 policy）
+    // index 0 = a_{t-1}（最近一次 raw policy action），index K-1 = a_{t-K}（最旧）
     // 让策略显式看到自己最近 K 步的指令序列，从而学到对自身延迟动力学的内部模型
     std::deque<std::vector<T>> actions_history;
 };
@@ -206,12 +218,15 @@ struct Observations
 class RL
 {
 public:
-    RL() {};
-    ~RL() {};
+    RL();
+    // out-of-line dtor: KinematicsFK 在本头文件里是 forward-decl，
+    // unique_ptr<KinematicsFK> 的析构需要看见完整类型，因此实现放到 rl_sdk.cpp。
+    virtual ~RL();
 
     YamlParams params;
     Observations<float> obs;
     std::vector<int> obs_dims;
+    std::vector<float> last_policy_obs;
 
     RobotState<float> robot_state;
     RobotCommand<float> robot_command;
@@ -236,6 +251,35 @@ public:
     void InitControl();
     void InitRL(std::string robot_config_path);
     void InitJointNum(size_t num_joints);
+    // Policy control step (seconds). Uses policy_step_time from yaml when set,
+    // otherwise dt * decimation from base config.
+    float GetPolicyStepTime() const;
+    virtual void OnPolicyConfigLoaded() {}
+    // Sim2sim: teleport sim state to ampobs init row (MuJoCo override).
+    virtual bool ApplyWholeBodyTrackingInitPoseFromAmpObs() { return false; }
+
+    // ----------------------------------------------------------------------
+    // Online forward kinematics (rl_real_myrobot 用到):
+    //   实机部署时 obs.key_body_pos_rel 必须由真实关节角 + base 朝向算出来，
+    //   否则跟训练分布脱钩。这里把功能集中在 rl_sdk，所有 backend 都可调用。
+    //   USE_MUJOCO=OFF 时 LoadFkModel 直接返回 false，调用方应回退到静态参考。
+    // ----------------------------------------------------------------------
+    /**
+     * 加载 MJCF + 建立 policy_idx -> mujoco body 的缓存。dance 切换前调一次即可。
+     * @return true 成功，可后续调用 ComputeKeyBodyPosFK。
+     */
+    bool LoadFkModel(const std::string& mjcf_path,
+                     const std::vector<int>& joint_mapping,
+                     const std::string& root_body_name = "base_link");
+
+    /**
+     * 用当前 obs.dof_pos + obs.base_quat 跑一次 mj_kinematics，
+     * 写入 obs.key_body_pos_rel（layout 与 rl_sim_mujoco.cpp 一致）。
+     * @return true 成功，false 表示 FK 未加载或维度不匹配（调用方应保留静态 fallback）。
+     */
+    bool ComputeKeyBodyPosFK();
+
+    bool IsFkAvailable() const;
 
     // Sim-to-Real: episode 边界（reset / 进入 RL state）调用，清空动作历史避免上 episode 残留污染
     // K 由 yaml 字段 actions_history_length 决定，缺省即 1（向后兼容旧 policy）
@@ -282,10 +326,18 @@ public:
                         const std::vector<float> &commands,
                         const std::vector<float> &base_ang_vel,
                         const std::vector<float> &base_quat,
+                        const std::vector<float> &projected_gravity,
                         const std::vector<float> &dof_pos,
                         const std::vector<float> &dof_pos_target,
                         const std::vector<float> &dof_vel,
+                        const std::vector<float> &policy_delta,
                         const std::vector<float> &actions);
+
+    void CSVInitPolicyObs(const std::string& robot_path, int obs_dim,
+                          const std::string& filename);
+    void CSVLoggerPolicyObs(int episode_step, float progress,
+                            const std::vector<float>& policy_obs,
+                            const std::vector<float>& actions);
 
     // control
     Control control;
@@ -298,6 +350,7 @@ public:
     // others
     int motiontime = 0;
     std::string robot_name, config_name;
+    std::string policy_obs_csv_filename;
     bool simulation_running = true;
     std::string ang_vel_axis = "body";  // "world" or "body"
     unsigned long long episode_length_buf = 0;
@@ -317,9 +370,13 @@ public:
     std::vector<float> output_dof_tau;
     std::vector<float> output_dof_pos;
     std::vector<float> output_dof_vel;
+    std::vector<float> output_dof_delta;
 
     // thread safety
     std::mutex model_mutex;
+
+    // online forward kinematics helper (lazy 创建; USE_MUJOCO=OFF 时永远 IsLoaded()==false)
+    std::unique_ptr<KinematicsFK> fk_helper_;
 };
 
 class RLFSMState : public FSMState

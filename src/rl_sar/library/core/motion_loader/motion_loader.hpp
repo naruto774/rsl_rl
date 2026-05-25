@@ -68,6 +68,12 @@ public:
     std::vector<float> GetRootQuat() const;
 
     /**
+     * @brief Get interpolated root position at current time
+     * @return Root position [x, y, z]
+     */
+    std::vector<float> GetRootPos() const;
+
+    /**
      * @brief Get anchor (torso) quaternion at current time
      *
      * For G1: torso = root * Rz(yaw) * Rx(roll) * Ry(pitch)
@@ -81,6 +87,14 @@ public:
      * @brief Get motion duration in seconds
      */
     float GetDuration() const { return duration_; }
+
+    /**
+     * @brief Set joint indices used for anchor (torso) orientation extraction.
+     *
+     * The index order is [yaw, roll, pitch] in motion joint space.
+     * If fewer than 3 indices are provided, missing axes are treated as 0 angle.
+     */
+    void SetAnchorJointIndices(const std::vector<int>& indices);
 
     /**
      * @brief Get world to init transformation quaternion (yaw alignment)
@@ -143,6 +157,8 @@ private:
 
     // Coordinate transformation
     std::vector<float> world_to_init_;  // For yaw alignment between robot and motion [w, x, y, z]
+    // Anchor orientation indices in motion joint space, ordered as [yaw, roll, pitch].
+    std::vector<int> anchor_joint_indices_{12, 13, 14};
 };
 
 #endif // MOTION_LOADER_HPP

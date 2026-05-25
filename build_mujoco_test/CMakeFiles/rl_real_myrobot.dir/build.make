@@ -103,6 +103,7 @@ bin/rl_real_myrobot: /home/elephant/robot/rl_sar/library/inference_runtime/libto
 bin/rl_real_myrobot: /home/elephant/robot/rl_sar/library/inference_runtime/onnxruntime/lib/libonnxruntime.so
 bin/rl_real_myrobot: /usr/lib/x86_64-linux-gnu/libpython3.10.so
 bin/rl_real_myrobot: /usr/lib/x86_64-linux-gnu/libtbb.so.12.5
+bin/rl_real_myrobot: /home/elephant/robot/rl_sar/library/mujoco/lib/libmujoco.so.3.2.7
 bin/rl_real_myrobot: CMakeFiles/rl_real_myrobot.dir/link.txt
 	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green --bold --progress-dir=/home/elephant/robot/rl_sar/build_mujoco_test/CMakeFiles --progress-num=$(CMAKE_PROGRESS_2) "Linking CXX executable bin/rl_real_myrobot"
 	$(CMAKE_COMMAND) -E cmake_link_script CMakeFiles/rl_real_myrobot.dir/link.txt --verbose=$(VERBOSE)

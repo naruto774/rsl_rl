@@ -70,6 +70,9 @@ private:
     void SetCommand(const RobotCommand<float> *command) override;
     void RunModel();
     void RobotControl();
+    void UpdatePolicyLoopPeriod();
+    void OnPolicyConfigLoaded() override;
+    bool ApplyWholeBodyTrackingInitPoseFromAmpObs() override;
 
     // loop
     std::shared_ptr<LoopFunc> loop_keyboard;

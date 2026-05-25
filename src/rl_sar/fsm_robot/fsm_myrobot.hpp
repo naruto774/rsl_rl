@@ -8,6 +8,7 @@
 
 #include "fsm.hpp"
 #include "rl_sdk.hpp"
+#include <cmath>
 
 namespace myrobot_fsm
 {
@@ -85,6 +86,13 @@ public:
             {
                 return "RLFSMStateRLLocomotion";
             }
+            else if (rl.control.current_keyboard == Input::Keyboard::Num2 ||
+                     rl.control.current_keyboard == Input::Keyboard::Down ||
+                     rl.control.current_gamepad == Input::Gamepad::RB_DPadDown)
+            {
+                std::cout << LOGGER::INFO << "[FSMDebug] GetUp -> Dance trigger detected." << std::endl;
+                return "RLFSMStateRLWholeBodyTrackingDance";
+            }
             else if (rl.control.current_keyboard == Input::Keyboard::Num9 || rl.control.current_gamepad == Input::Gamepad::B)
             {
                 return "RLFSMStateGetDown";
@@ -157,7 +165,7 @@ public:
         // read params from yaml
         // config_name is set by rl_real_myrobot.cpp or rl_sim_mujoco.cpp before FSM init
         // default to "robot_lab" for MuJoCo sim, "robot_lab_real" for real robot
-        if (rl.config_name.empty())
+        if (rl.config_name.empty() || rl.config_name == "whole_body_tracking")
         {
             rl.config_name = "robot_lab";
         }
@@ -225,10 +233,182 @@ public:
         // position transition from last default_dof_pos to current default_dof_pos
         // if (Interpolate(percent_transition, rl.now_state.motor_state.q, rl.params.Get<std::vector<float>>("default_dof_pos"), 0.5f, "Policy transition", true)) return;
 
+        // Handle skill switch even on the first cycle after state transition.
+        if (rl.control.current_keyboard == Input::Keyboard::Num2 ||
+            rl.control.current_keyboard == Input::Keyboard::Down ||
+            rl.control.current_gamepad == Input::Gamepad::RB_DPadDown)
+        {
+            std::cout << LOGGER::INFO << "[FSMDebug] Locomotion -> Dance trigger detected, requesting switch." << std::endl;
+            rl.fsm.RequestStateChange("RLFSMStateRLWholeBodyTrackingDance");
+            return;
+        }
+
         if (!rl.rl_init_done) rl.rl_init_done = true;
 
         std::cout << "\r\033[K" << std::flush << LOGGER::INFO << "RL Controller [" << rl.config_name << "] x:" << rl.control.x << " y:" << rl.control.y << " yaw:" << rl.control.yaw << std::flush;
         RLControl();
+    }
+
+    void Exit() override
+    {
+        rl.rl_init_done = false;
+    }
+
+    std::string CheckChange() override
+    {
+        // Keep dance state even when robot falls, so we can observe policy outputs
+        // in out-of-distribution postures. Do not auto-exit on P/LB_X here.
+        if (rl.control.current_keyboard == Input::Keyboard::Num9 || rl.control.current_gamepad == Input::Gamepad::B)
+        {
+            return "RLFSMStateGetDown";
+        }
+        else if (rl.control.current_keyboard == Input::Keyboard::Num0 || rl.control.current_gamepad == Input::Gamepad::A)
+        {
+            return "RLFSMStateGetUp";
+        }
+        else if (rl.control.current_keyboard == Input::Keyboard::Num1 || rl.control.current_gamepad == Input::Gamepad::RB_DPadUp)
+        {
+            return "RLFSMStateRLLocomotion";
+        } 
+        else if (rl.control.current_keyboard == Input::Keyboard::Num2 ||
+                 rl.control.current_keyboard == Input::Keyboard::Down ||
+                 rl.control.current_gamepad == Input::Gamepad::RB_DPadDown)
+        {
+            return "RLFSMStateRLWholeBodyTrackingDance";
+        }
+        return state_name_;
+    }
+};
+class RLFSMStateRLWholeBodyTrackingDance : public RLFSMState
+{
+public:
+    RLFSMStateRLWholeBodyTrackingDance(RL *rl) : RLFSMState(*rl, "RLFSMStateRLWholeBodyTrackingDance") {}
+
+    void Enter() override
+    {
+        rl.episode_length_buf = 0;
+        rl.rl_wait_first_frame = true;
+        rl.rl_blend_active = false;
+        rl.rl_blend_time = 0.0f;
+        rl.rl_blend_duration = 0.2f;
+        std::vector<float> hold_q_old_order = fsm_state->motor_state.q;
+        std::vector<int> old_joint_mapping = rl.params.Get<std::vector<int>>("joint_mapping");
+        rl.hold_q_on_enter = hold_q_old_order;
+        rl.rl_blend_q_target = hold_q_old_order;
+        rl.rl_blend_dq_target.assign(rl.params.Get<int>("num_of_dofs"), 0.0f);
+
+        std::vector<float> stale_output;
+        while (rl.output_dof_pos_queue.try_pop(stale_output)) {}
+        while (rl.output_dof_vel_queue.try_pop(stale_output)) {}
+        while (rl.output_dof_tau_queue.try_pop(stale_output)) {}
+
+        // read params from yaml
+        rl.config_name = "whole_body_tracking";
+        std::string robot_config_path = rl.robot_name + "/" + rl.config_name;
+        try
+        {
+            rl.InitRL(robot_config_path);
+            // Dance smooth-start guard:
+            // even when generic rl_blend_duration is 0 for ablation, keep a
+            // minimum startup blend window to avoid first-frame target jump.
+            const float rl_blend_duration_cfg =
+                std::max(0.0f, rl.params.Get<float>("rl_blend_duration", 0.2f));
+            const float dance_min_startup_blend_duration =
+                std::max(0.0f, rl.params.Get<float>("dance_min_startup_blend_duration", 0.25f));
+            rl.rl_blend_duration = std::max(rl_blend_duration_cfg, dance_min_startup_blend_duration);
+            auto new_joint_mapping = rl.params.Get<std::vector<int>>("joint_mapping");
+            const int num_dofs = rl.params.Get<int>("num_of_dofs");
+
+            // Pure sim2sim deployment mode: no reference motion file dependency.
+            rl.motion_loader.reset();
+            rl.motion_length = 0.0f;
+            if (rl.params.Get<int>("max_episode_length", -1) <= 1)
+            {
+                const float step_time = rl.GetPolicyStepTime();
+                const float episode_duration_s = rl.params.Get<float>("episode_duration_seconds", 22.0f);
+                const int max_episode_length = std::max(2, static_cast<int>(std::round(episode_duration_s / std::max(step_time, 1e-6f))));
+                rl.params.config_node["max_episode_length"] = max_episode_length;
+            }
+            std::cout << LOGGER::INFO << "Dance episode horizon: "
+                      << rl.params.Get<int>("max_episode_length", 0) << " steps @ "
+                      << (1.0f / std::max(rl.GetPolicyStepTime(), 1e-6f)) << " Hz" << std::endl;
+
+            const bool pose_from_amp = rl.ApplyWholeBodyTrackingInitPoseFromAmpObs();
+            if (!pose_from_amp)
+            {
+                bool remap_ok =
+                    hold_q_old_order.size() == static_cast<size_t>(num_dofs) &&
+                    old_joint_mapping.size() == static_cast<size_t>(num_dofs) &&
+                    new_joint_mapping.size() == static_cast<size_t>(num_dofs);
+
+                if (remap_ok)
+                {
+                    std::vector<float> hold_q_new_order(num_dofs, 0.0f);
+                    for (int old_idx = 0; old_idx < num_dofs; ++old_idx)
+                    {
+                        int actuator_id = old_joint_mapping[old_idx];
+                        int new_idx = -1;
+                        for (int idx = 0; idx < num_dofs; ++idx)
+                        {
+                            if (new_joint_mapping[idx] == actuator_id)
+                            {
+                                new_idx = idx;
+                                break;
+                            }
+                        }
+                        if (new_idx < 0)
+                        {
+                            remap_ok = false;
+                            break;
+                        }
+                        hold_q_new_order[new_idx] = hold_q_old_order[old_idx];
+                    }
+                    if (remap_ok)
+                    {
+                        rl.hold_q_on_enter = hold_q_new_order;
+                    }
+                }
+
+                if (!remap_ok)
+                {
+                    rl.hold_q_on_enter = hold_q_old_order;
+                    std::cout << LOGGER::WARNING << "[WholeBodyTrackingDance] hold_q remap skipped, fallback to previous joint order." << std::endl;
+                }
+                rl.rl_blend_q_target = rl.hold_q_on_enter;
+                rl.rl_blend_dq_target.assign(rl.params.Get<int>("num_of_dofs"), 0.0f);
+            }
+
+            rl.now_state = *fsm_state;
+        }
+        catch (const std::exception& e)
+        {
+            std::cout << LOGGER::ERROR << "InitRL() failed: " << e.what() << std::endl;
+            rl.rl_init_done = false;
+            rl.fsm.RequestStateChange("RLFSMStatePassive");
+        }
+    }
+
+    void Run() override
+    {
+        // position transition from last default_dof_pos to current default_dof_pos
+        // if (Interpolate(percent_transition, rl.now_state.motor_state.q, rl.params.Get<std::vector<float>>("default_dof_pos"), 0.5f, "Policy transition", true)) return;
+
+        if (!rl.rl_init_done) rl.rl_init_done = true;
+
+        // Print episode progress (sim2sim deployment), independent from any motion file.
+        float percent = 0.0f;
+        const int max_episode_length = rl.params.Get<int>("max_episode_length", -1);
+        if (max_episode_length > 1)
+        {
+            percent = std::clamp(static_cast<float>(rl.episode_length_buf) /
+                                 static_cast<float>(max_episode_length - 1), 0.0f, 1.0f);
+        }
+        LOGGER::PrintProgress(percent, rl.config_name);
+
+        RLControl();
+
+        // Keep dance state after finishing playback.
+        // Users can still switch state manually via keyboard/gamepad in CheckChange().
     }
 
     void Exit() override
@@ -253,7 +433,13 @@ public:
         else if (rl.control.current_keyboard == Input::Keyboard::Num1 || rl.control.current_gamepad == Input::Gamepad::RB_DPadUp)
         {
             return "RLFSMStateRLLocomotion";
-        } 
+        }
+        else if (rl.control.current_keyboard == Input::Keyboard::Num2 ||
+                 rl.control.current_keyboard == Input::Keyboard::Down ||
+                 rl.control.current_gamepad == Input::Gamepad::RB_DPadDown)
+        {
+            return "RLFSMStateRLWholeBodyTrackingDance";
+        }
         return state_name_;
     }
 };
@@ -275,6 +461,8 @@ public:
             return std::make_shared<myrobot_fsm::RLFSMStateGetDown>(rl);
         else if (state_name == "RLFSMStateRLLocomotion")
             return std::make_shared<myrobot_fsm::RLFSMStateRLLocomotion>(rl);
+        else if (state_name == "RLFSMStateRLWholeBodyTrackingDance")
+            return std::make_shared<myrobot_fsm::RLFSMStateRLWholeBodyTrackingDance>(rl);
         return nullptr;
     }
     std::string GetType() const override { return "myrobot"; }
@@ -284,7 +472,8 @@ public:
             "RLFSMStatePassive",
             "RLFSMStateGetUp",
             "RLFSMStateGetDown",
-            "RLFSMStateRLLocomotion"
+            "RLFSMStateRLLocomotion",
+            "RLFSMStateRLWholeBodyTrackingDance"
         };
     }
     std::string GetInitialState() const override { return initial_state_; }

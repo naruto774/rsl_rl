@@ -29,6 +29,7 @@ libtorch
 # Mujoco
 mujoco
 MUJOCO_LOG.TXT
+*.mjb
 
 # Data
 .cache

@@ -320,7 +320,9 @@ CMakeFiles/rl_sdk.dir/library/core/rl_sdk/rl_sdk.cpp.o: \
  /usr/include/oneapi/tbb/detail/_exception.h \
  /usr/include/oneapi/tbb/detail/_containers_helpers.h \
  /usr/include/oneapi/tbb/cache_aligned_allocator.h \
- /usr/include/c++/11/fstream /usr/include/c++/11/bits/codecvt.h \
+ /usr/include/c++/11/deque /usr/include/c++/11/bits/stl_deque.h \
+ /usr/include/c++/11/bits/deque.tcc /usr/include/c++/11/fstream \
+ /usr/include/c++/11/bits/codecvt.h \
  /usr/include/x86_64-linux-gnu/c++/11/bits/basic_file.h \
  /usr/include/x86_64-linux-gnu/c++/11/bits/c++io.h \
  /usr/include/c++/11/bits/fstream.tcc /usr/include/c++/11/mutex \
@@ -428,8 +430,6 @@ CMakeFiles/rl_sdk.dir/library/core/rl_sdk/rl_sdk.cpp.o: \
  /home/elephant/robot/rl_sar/library/inference_runtime/libtorch/include/ATen/Context.h \
  /home/elephant/robot/rl_sar/library/inference_runtime/libtorch/include/ATen/CPUGeneratorImpl.h \
  /home/elephant/robot/rl_sar/library/inference_runtime/libtorch/include/ATen/core/Generator.h \
- /usr/include/c++/11/deque /usr/include/c++/11/bits/stl_deque.h \
- /usr/include/c++/11/bits/deque.tcc \
  /home/elephant/robot/rl_sar/library/inference_runtime/libtorch/include/c10/util/Exception.h \
  /home/elephant/robot/rl_sar/library/inference_runtime/libtorch/include/c10/macros/Export.h \
  /home/elephant/robot/rl_sar/library/inference_runtime/libtorch/include/c10/macros/cmake_macros.h \
@@ -4878,6 +4878,7 @@ CMakeFiles/rl_sdk.dir/library/core/rl_sdk/rl_sdk.cpp.o: \
  /home/elephant/robot/rl_sar/library/inference_runtime/onnxruntime/include/onnxruntime_cxx_inline.h \
  /home/elephant/robot/rl_sar/src/rl_sar/library/core/motion_loader/motion_loader.hpp \
  /home/elephant/robot/rl_sar/src/rl_sar/library/core/motion_loader/../logger/logger.hpp \
+ /home/elephant/robot/rl_sar/src/rl_sar/library/core/kinematics/kinematics_fk.hpp \
  /usr/include/termios.h /usr/include/x86_64-linux-gnu/bits/termios.h \
  /usr/include/x86_64-linux-gnu/bits/termios-struct.h \
  /usr/include/x86_64-linux-gnu/bits/termios-c_cc.h \

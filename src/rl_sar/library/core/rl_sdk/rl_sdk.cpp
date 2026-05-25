@@ -4,7 +4,38 @@
  */
 
 #include "rl_sdk.hpp"
+#include "kinematics_fk.hpp"
 #include <iomanip>
+#include <filesystem>
+
+// Out-of-line ctor/dtor 让 unique_ptr<KinematicsFK> 能在这里看到完整类型，
+// 否则 hpp 里的 forward-decl + inline dtor 会触发 sizeof incomplete type 报错。
+RL::RL() = default;
+RL::~RL() = default;
+
+bool RL::LoadFkModel(const std::string& mjcf_path,
+                    const std::vector<int>& joint_mapping,
+                    const std::string& root_body_name)
+{
+    if (!this->fk_helper_)
+    {
+        this->fk_helper_ = std::make_unique<KinematicsFK>();
+    }
+    return this->fk_helper_->Load(mjcf_path, joint_mapping, root_body_name);
+}
+
+bool RL::IsFkAvailable() const
+{
+    return this->fk_helper_ != nullptr && this->fk_helper_->IsLoaded();
+}
+
+bool RL::ComputeKeyBodyPosFK()
+{
+    if (!IsFkAvailable()) return false;
+    // 复用 obs.dof_pos / obs.base_quat（RunModel 在调用本函数前已经填好）
+    return this->fk_helper_->ComputeKeyBodyPosRel(
+        this->obs.dof_pos, this->obs.base_quat, this->obs.key_body_pos_rel);
+}
 void RL::StateController(const RobotState<float>* state, RobotCommand<float>* command)
 {
     auto updateState = [&](std::shared_ptr<FSMState> statePtr)
@@ -26,11 +57,11 @@ void RL::StateController(const RobotState<float>* state, RobotCommand<float>* co
 
     if (this->control.current_keyboard == Input::Keyboard::W)
     {
-        this->control.x += 0.1f;
+        this->control.x += 0.01f;
     }
     if (this->control.current_keyboard == Input::Keyboard::S)
     {
-        this->control.x -= 0.1f;
+        this->control.x -= 0.01f;
     }
     if (this->control.current_keyboard == Input::Keyboard::A)
     {
@@ -119,15 +150,15 @@ std::vector<float> RL::ComputeObservation()
         else if (observation == "actions_history")
         {
             // Sim-to-Real: 动作历史堆叠（actuator delay robustness）
-            // 数学：将最近 K 步 clipped action 按 newest-first 拼成 K*num_of_dofs 维向量
-            //   o_{actions_history}_t = [a_{t-1}, a_{t-2}, ..., a_{t-K}]
-            // 训练侧（IsaacLab 默认）使用 clipped action（_apply_action 之前的 self.actions），
-            // 与 RL_Sim::RunModel 中 push_front(this->obs.actions) 时机一致（Forward 已含 clip）。
+            // 数学：RobotLab / IsaacLab ObservationManager flatten_history_dim=True
+            // 按 oldest -> newest 输出历史：
+            //   o_{actions_history}_t = [a_{t-K}, ..., a_{t-2}, a_{t-1}]
+            // 内部 deque 仍用 push_front 维护 newest-first，因此这里反向读出以对齐训练观测空间。
             const int K = this->params.Get<int>("actions_history_length", 1);
             const int n = this->params.Get<int>("num_of_dofs");
             std::vector<float> stacked;
             stacked.reserve(static_cast<size_t>(K) * static_cast<size_t>(n));
-            for (int k = 0; k < K; ++k)
+            for (int k = K - 1; k >= 0; --k)
             {
                 if (k < static_cast<int>(this->obs.actions_history.size()))
                 {
@@ -154,6 +185,102 @@ std::vector<float> RL::ComputeObservation()
             obs_list.push_back(stacked);
         }
         // ============= Other Observations =============
+        else if (observation == "whole_body_tracking/joint_pos")
+        {
+            obs_list.push_back(this->obs.dof_pos);
+        }
+        else if (observation == "whole_body_tracking/joint_vel")
+        {
+            obs_list.push_back(this->obs.dof_vel);
+        }
+        else if (observation == "whole_body_tracking/root_pos_relative")
+        {
+            // Align with training: use current robot root height (z).
+            // If backend does not provide base_pos, keep a stable zero fallback.
+            float root_z = 0.0f;
+            if (this->obs.base_pos.size() >= 3)
+            {
+                root_z = this->obs.base_pos[2];
+            }
+            obs_list.push_back({root_z});
+        }
+        else if (observation == "whole_body_tracking/ref_body_quat_tan_norm")
+        {
+            // Isaac humanoid_amp: quaternion_to_tangent_and_normal
+            // tangent = quat_apply(q, [1,0,0]), normal = quat_apply(q, [0,0,1])
+            std::vector<float> root_rot_6d(6, 0.0f);
+            if (this->obs.base_quat.size() == 4)
+            {
+                const std::vector<float> tangent = QuatApply(this->obs.base_quat, {1.0f, 0.0f, 0.0f});
+                const std::vector<float> normal = QuatApply(this->obs.base_quat, {0.0f, 0.0f, 1.0f});
+                root_rot_6d = {
+                    tangent[0], tangent[1], tangent[2],
+                    normal[0], normal[1], normal[2]
+                };
+
+                if (this->params.Get<bool>("root_rot_6d_swap_xy", false))
+                {
+                    std::swap(root_rot_6d[0], root_rot_6d[1]);
+                    std::swap(root_rot_6d[3], root_rot_6d[4]);
+                }
+            }
+            obs_list.push_back(root_rot_6d);
+        }
+        else if (observation == "whole_body_tracking/key_body_pos_relative")
+        {
+            const std::vector<int> default_key_body_joint_indices = {
+                9, 10, 13, 14, 17, 18, 20, 19, 5, 7, 6, 12, 11
+            };
+            auto key_body_joint_indices = this->params.Get<std::vector<int>>(
+                "key_body_joint_indices", default_key_body_joint_indices
+            );
+            std::vector<float> key_body_pos_relative;
+            key_body_pos_relative.reserve(key_body_joint_indices.size() * 3);
+
+            const bool has_key_body_cache =
+                !this->obs.key_body_pos_rel.empty() &&
+                this->obs.key_body_pos_rel.size() >= static_cast<size_t>(this->params.Get<int>("num_of_dofs")) * 3;
+            if (has_key_body_cache)
+            {
+                for (int joint_idx : key_body_joint_indices)
+                {
+                    const int base = joint_idx * 3;
+                    if (joint_idx >= 0 &&
+                        base + 2 < static_cast<int>(this->obs.key_body_pos_rel.size()))
+                    {
+                        key_body_pos_relative.push_back(this->obs.key_body_pos_rel[base + 0]);
+                        key_body_pos_relative.push_back(this->obs.key_body_pos_rel[base + 1]);
+                        key_body_pos_relative.push_back(this->obs.key_body_pos_rel[base + 2]);
+                    }
+                    else
+                    {
+                        key_body_pos_relative.insert(key_body_pos_relative.end(), {0.0f, 0.0f, 0.0f});
+                    }
+                }
+            }
+            else
+            {
+                key_body_pos_relative.assign(key_body_joint_indices.size() * 3, 0.0f);
+            }
+
+            obs_list.push_back(key_body_pos_relative);
+        }
+        else if (observation == "whole_body_tracking/progress")
+        {
+            // H-1: training step k (1-indexed in episode_length_buf after `+=1` at RunModel
+            // entry) computes obs BEFORE physics step. The very first policy.forward should see
+            // progress=0 paired with the *initial* physical state, just like Isaac at reset.
+            // Previous formula `episode_length_buf / (max-1)` was off-by-one (1/(max-1) at step 1).
+            float progress = 0.0f;
+            const int max_episode_length = this->params.Get<int>("max_episode_length", -1);
+            if (max_episode_length > 1 && this->episode_length_buf >= 1)
+            {
+                progress = static_cast<float>(this->episode_length_buf - 1) /
+                           static_cast<float>(max_episode_length - 1);
+            }
+            progress = std::clamp(progress, 0.0f, 1.0f);
+            obs_list.push_back({progress});
+        }
         else if (observation == "whole_body_tracking/motion_command")
         {
             std::vector<float> motion_cmd;
@@ -184,11 +311,17 @@ std::vector<float> RL::ComputeObservation()
             if (this->motion_loader)
             {
                 auto waist_sdk_indices = this->params.Get<std::vector<int>>("waist_joint_indices");
-                std::vector<float> waist_angles = {
-                    this->obs.dof_pos[InverseJointMapping(waist_sdk_indices[0])],
-                    this->obs.dof_pos[InverseJointMapping(waist_sdk_indices[1])],
-                    this->obs.dof_pos[InverseJointMapping(waist_sdk_indices[2])]
-                };
+                // MotionLoader::ComputeTorsoQuat expects [yaw, roll, pitch].
+                // Some robots only provide 2 waist DoFs in config; in that case we pad the missing axis with 0.
+                std::vector<float> waist_angles(3, 0.0f);
+                for (size_t i = 0; i < waist_sdk_indices.size() && i < 3; ++i)
+                {
+                    int idx = InverseJointMapping(waist_sdk_indices[i]);
+                    if (idx >= 0 && idx < static_cast<int>(this->obs.dof_pos.size()))
+                    {
+                        waist_angles[i] = this->obs.dof_pos[idx];
+                    }
+                }
                 std::vector<float> robot_torso_quat_w = MotionLoader::ComputeTorsoQuat(this->obs.base_quat, waist_angles);
                 std::vector<float> ref_torso_quat_w = this->motion_loader->GetAnchorQuat();
                 std::vector<float> init_quat = this->motion_loader->GetInitQuat();
@@ -232,9 +365,12 @@ void RL::InitObservations()
     this->obs.gravity_vec = {0.0f, 0.0f, -1.0f};
     this->obs.commands = {0.0f, 0.0f, 0.0f};
     this->obs.base_quat = {0.0f, 0.0f, 0.0f, 1.0f};
+    this->obs.base_pos = {0.0f, 0.0f, 0.0f};
     this->obs.dof_pos = this->params.Get<std::vector<float>>("default_dof_pos");
     this->obs.dof_vel.clear();
     this->obs.dof_vel.resize(this->params.Get<int>("num_of_dofs"), 0.0f);
+    this->obs.key_body_pos_rel.clear();
+    this->obs.key_body_pos_rel.resize(this->params.Get<int>("num_of_dofs") * 3, 0.0f);
     this->obs.actions.clear();
     this->obs.actions.resize(this->params.Get<int>("num_of_dofs"), 0.0f);
     // 动作历史按 K 帧零向量初始化，保证首次 ComputeObservation 维度立即就位
@@ -262,6 +398,8 @@ void RL::InitOutputs()
     this->output_dof_pos = this->params.Get<std::vector<float>>("default_dof_pos");
     this->output_dof_vel.clear();
     this->output_dof_vel.resize(num_of_dofs, 0.0f);
+    this->output_dof_delta.clear();
+    this->output_dof_delta.resize(num_of_dofs, 0.0f);
 }
 
 void RL::InitControl()
@@ -303,27 +441,241 @@ void RL::InitRL(std::string robot_config_path)
 
     // init model
     std::string model_path = std::string(POLICY_DIR) + "/" + robot_config_path + "/" + this->params.Get<std::string>("model_name");
+    std::filesystem::path model_fs_path(model_path);
+    if (!std::filesystem::exists(model_fs_path))
+    {
+        throw std::runtime_error("Model file does not exist: " + model_path);
+    }
+    std::error_code ec;
+    const auto model_size = std::filesystem::file_size(model_fs_path, ec);
+    if (!ec)
+    {
+        std::cout << LOGGER::INFO
+                  << "[InitRL] Loading model: " << model_path
+                  << " (" << model_size << " bytes)" << std::endl;
+    }
+    else
+    {
+        std::cout << LOGGER::INFO
+                  << "[InitRL] Loading model: " << model_path
+                  << " (size unavailable)" << std::endl;
+    }
     this->model = InferenceRuntime::ModelFactory::load_model(model_path);
     if (!this->model)
     {
-        throw std::runtime_error("Failed to load model from: " + model_path);
+        throw std::runtime_error(
+            "Failed to load model from: " + model_path +
+            " (check runtime log for Torch/ONNX backend error details)"
+        );
     }
+
+    this->OnPolicyConfigLoaded();
+}
+
+float RL::GetPolicyStepTime() const
+{
+    if (this->params.Has("policy_step_time"))
+    {
+        return this->params.Get<float>("policy_step_time");
+    }
+    return this->params.Get<float>("dt") * static_cast<float>(this->params.Get<int>("decimation"));
 }
 
 void RL::ComputeOutput(const std::vector<float> &actions, std::vector<float> &output_dof_pos, std::vector<float> &output_dof_vel, std::vector<float> &output_dof_tau)
 {
+    const int num_dofs = this->params.Get<int>("num_of_dofs");
+    const bool disable_action_clip = this->params.Get<bool>("disable_action_clip", false);
     std::vector<float> actions_scaled = actions * this->params.Get<std::vector<float>>("action_scale");
-    std::vector<float> pos_actions_scaled = actions_scaled;
+    // Align with training-side processing order: scale first, then clip.
+    std::vector<float> actions_processed = actions_scaled;
+    const auto clip_lower = this->params.Get<std::vector<float>>("clip_actions_lower");
+    const auto clip_upper = this->params.Get<std::vector<float>>("clip_actions_upper");
+    if (!disable_action_clip && !clip_lower.empty() && !clip_upper.empty())
+    {
+        actions_processed = clamp(actions_processed, clip_lower, clip_upper);
+    }
+
+    // Use true actuator state for control targets/errors (not noisy observation tensors).
+    const std::vector<float>& q_current = this->robot_state.motor_state.q;
+    const std::vector<float>& dq_current = this->robot_state.motor_state.dq;
+
+    // Optional post-processing safety (opt-in by config):
+    // 1) q_target clamp to configured lower/upper bounds
+    // 2) per-step rate limit: |q_target - q_current| <= max_step
+    // 3) transition ramp: q_target <- q_current + alpha * (q_target - q_current)
+    auto apply_q_target_safety = [&](std::vector<float>& q_target) {
+        if (static_cast<int>(q_target.size()) != num_dofs) return;
+
+        if (this->params.Get<bool>("enable_q_target_clamp", false))
+        {
+            auto q_lower = this->params.Get<std::vector<float>>("q_target_lower");
+            auto q_upper = this->params.Get<std::vector<float>>("q_target_upper");
+            if (static_cast<int>(q_lower.size()) == num_dofs && static_cast<int>(q_upper.size()) == num_dofs)
+            {
+                q_target = clamp(q_target, q_lower, q_upper);
+            }
+        }
+
+        if (this->params.Get<bool>("enable_q_target_rate_limit", false))
+        {
+            std::vector<float> max_step = this->params.Get<std::vector<float>>("q_target_max_step");
+            if (max_step.empty())
+            {
+                const float step_scalar = this->params.Get<float>("q_target_max_step_scalar", 0.0f);
+                max_step.assign(num_dofs, step_scalar);
+            }
+            if (static_cast<int>(max_step.size()) == num_dofs &&
+                static_cast<int>(q_current.size()) == num_dofs)
+            {
+                for (int i = 0; i < num_dofs; ++i)
+                {
+                    const float s = std::max(0.0f, max_step[i]);
+                    if (s <= 0.0f) continue;
+                    const float lo = q_current[i] - s;
+                    const float hi = q_current[i] + s;
+                    q_target[i] = std::clamp(q_target[i], lo, hi);
+                }
+            }
+        }
+
+        if (this->params.Get<bool>("enable_action_ramp", false))
+        {
+            const float ramp_duration = this->params.Get<float>("action_ramp_duration", 0.0f);
+            if (ramp_duration > 1e-6f &&
+                static_cast<int>(q_current.size()) == num_dofs)
+            {
+                const float t = static_cast<float>(this->episode_length_buf) *
+                                this->GetPolicyStepTime();
+                const float alpha = std::clamp(t / ramp_duration, 0.0f, 1.0f);
+                for (int i = 0; i < num_dofs; ++i)
+                {
+                    q_target[i] = q_current[i] + alpha * (q_target[i] - q_current[i]);
+                }
+            }
+        }
+    };
+
+    // Optional sim2sim alignment branch:
+    // q_target = offset + scale ⊙ a, where
+    // offset = (q_max_soft + q_min_soft)/2, scale = q_max_soft - q_min_soft.
+    // This branch is opt-in via yaml and only affects configs that enable it.
+    const bool use_soft_joint_pos_action = this->params.Get<bool>("use_soft_joint_pos_action", false);
+    if (use_soft_joint_pos_action)
+    {
+        std::vector<float> action_for_target = actions;
+        if (this->params.Get<bool>("soft_limit_apply_action_scale", false))
+        {
+            action_for_target = actions_scaled;
+        }
+        else
+        {
+            if (!disable_action_clip && !clip_lower.empty() && !clip_upper.empty())
+            {
+                action_for_target = clamp(action_for_target, clip_lower, clip_upper);
+            }
+        }
+
+        std::vector<float> q_min_soft = this->params.Get<std::vector<float>>("soft_joint_pos_min");
+        std::vector<float> q_max_soft = this->params.Get<std::vector<float>>("soft_joint_pos_max");
+        if (static_cast<int>(q_min_soft.size()) == num_dofs &&
+            static_cast<int>(q_max_soft.size()) == num_dofs &&
+            static_cast<int>(action_for_target.size()) == num_dofs)
+        {
+            output_dof_pos.resize(num_dofs, 0.0f);
+            for (int i = 0; i < num_dofs; ++i)
+            {
+                const float offset = 0.5f * (q_max_soft[i] + q_min_soft[i]);
+                const float scale = (q_max_soft[i] - q_min_soft[i]);
+                output_dof_pos[i] = offset + scale * action_for_target[i];
+            }
+            apply_q_target_safety(output_dof_pos);
+
+            std::vector<float> vel_actions_scaled(actions.size(), 0.0f);
+            for (int i : this->params.Get<std::vector<int>>("wheel_indices"))
+            {
+                if (i >= 0 && i < static_cast<int>(vel_actions_scaled.size()) &&
+                    i < static_cast<int>(action_for_target.size()))
+                {
+                    vel_actions_scaled[i] = action_for_target[i];
+                }
+            }
+            output_dof_vel = vel_actions_scaled;
+            output_dof_tau = this->params.Get<std::vector<float>>("rl_kp") * (output_dof_pos - q_current)
+                           + this->params.Get<std::vector<float>>("rl_kd") * (output_dof_vel - dq_current);
+            output_dof_tau = clamp(output_dof_tau,
+                                   -this->params.Get<std::vector<float>>("torque_limits"),
+                                   this->params.Get<std::vector<float>>("torque_limits"));
+            this->output_dof_delta = output_dof_pos - this->params.Get<std::vector<float>>("default_dof_pos");
+            return;
+        }
+        else
+        {
+            static bool warned_soft_limits_once = false;
+            if (!warned_soft_limits_once)
+            {
+                warned_soft_limits_once = true;
+                std::cout << LOGGER::WARNING
+                          << "[ComputeOutput] use_soft_joint_pos_action=true but soft_joint_pos_min/max size mismatch. "
+                          << "Fallback to legacy action mapping." << std::endl;
+            }
+        }
+    }
+
+    std::vector<float> pos_actions_scaled = actions_processed;
     std::vector<float> vel_actions_scaled(actions.size(), 0.0f);
     for (int i : this->params.Get<std::vector<int>>("wheel_indices"))
     {
         pos_actions_scaled[i] = 0.0f;
-        vel_actions_scaled[i] = actions_scaled[i];
+        vel_actions_scaled[i] = actions_processed[i];
     }
-    std::vector<float> all_actions_scaled = pos_actions_scaled + vel_actions_scaled;
-    output_dof_pos = pos_actions_scaled + this->params.Get<std::vector<float>>("default_dof_pos");
+
+    // Deadzone is configured per-policy in yaml and loaded by InitRL.
+    // Keep default as all-zero (disabled) for full backward compatibility.
+    std::vector<float> deadzone_lower = this->params.Get<std::vector<float>>(
+        "action_deadzone_lower", std::vector<float>(actions.size(), 0.0f)
+    );
+    std::vector<float> deadzone_upper = this->params.Get<std::vector<float>>(
+        "action_deadzone_upper", std::vector<float>(actions.size(), 0.0f)
+    );
+    deadzone_lower.resize(actions.size(), 0.0f);
+    deadzone_upper.resize(actions.size(), 0.0f);
+    for (size_t i = 0; i < pos_actions_scaled.size(); ++i)
+    {
+        float& x = pos_actions_scaled[i];
+        if (x > deadzone_lower[i] && x < deadzone_upper[i])
+        {
+            x = 0.0f;
+        }
+    }
+
+    this->output_dof_delta = pos_actions_scaled;
+
+    const std::string action_type = this->params.Get<std::string>("action_type", "default_position");
+    if (action_type == "relative_position")
+    {
+        // Match IsaacLab RelativeJointPositionAction: q_target = q_current + delta_q.
+        output_dof_pos = q_current + pos_actions_scaled;
+    }
+    else
+    {
+        output_dof_pos = pos_actions_scaled + this->params.Get<std::vector<float>>("default_dof_pos");
+    }
+    apply_q_target_safety(output_dof_pos);
+    // Position mode uses zero velocity target; wheel indices carry their velocity targets above.
     output_dof_vel = vel_actions_scaled;
-    output_dof_tau = this->params.Get<std::vector<float>>("rl_kp") * (all_actions_scaled + this->params.Get<std::vector<float>>("default_dof_pos") - this->obs.dof_pos) - this->params.Get<std::vector<float>>("rl_kd") * this->obs.dof_vel;
+    if (action_type == "relative_position")
+    {
+        // Relative-position torque form requested:
+        //   q_delta = clip(action * scale)
+        //   tau = kp * q_delta + kd * (0 - v_current)
+        output_dof_tau = this->params.Get<std::vector<float>>("rl_kp") * pos_actions_scaled
+                       + this->params.Get<std::vector<float>>("rl_kd") * (output_dof_vel - dq_current);
+    }
+    else
+    {
+        output_dof_tau = this->params.Get<std::vector<float>>("rl_kp") * (output_dof_pos - q_current)
+                       + this->params.Get<std::vector<float>>("rl_kd") * (output_dof_vel - dq_current);
+    }
     output_dof_tau = clamp(output_dof_tau, -this->params.Get<std::vector<float>>("torque_limits"), this->params.Get<std::vector<float>>("torque_limits"));
 }
 
@@ -559,7 +911,8 @@ void RL::CSVInit(std::string robot_path)
     csv_filename += ".csv";
     std::ofstream file(csv_filename.c_str());
 
-    // for(int i = 0; i < this->params.Get<int>("num_of_dofs"); ++i) { file << "torque_" << i << ","; }
+    for(int i = 0; i < this->params.Get<int>("num_of_dofs"); ++i) { file << "torque_" << i << ","; }
+    for(int i = 0; i < this->params.Get<int>("num_of_dofs"); ++i) { file << "policy_delta_" << i << ","; }
     // for(int i = 0; i < this->params.Get<int>("num_of_dofs"); ++i) { file << "tau_est_" << i << ","; }
     for(int i = 0; i < this->params.Get<int>("num_of_dofs"); ++i) { file << "joint_pos_" << i << ","; }
     for(int i = 0; i < this->params.Get<int>("num_of_dofs"); ++i) { file << "joint_pos_target_" << i << ","; }
@@ -574,7 +927,8 @@ void RL::CSVLogger(const std::vector<float>& torque, const std::vector<float>& t
 {
     std::ofstream file(csv_filename.c_str(), std::ios_base::app);
 
-    // for(int i = 0; i < this->params.Get<int>("num_of_dofs"); ++i) { file << torque[i] << ","; }
+    for(int i = 0; i < this->params.Get<int>("num_of_dofs"); ++i) { file << torque[i] << ","; }
+    for(int i = 0; i < this->params.Get<int>("num_of_dofs"); ++i) { file << this->output_dof_delta[i] << ","; }
     // for(int i = 0; i < this->params.Get<int>("num_of_dofs"); ++i) { file << tau_est[i] << ","; }
     for(int i = 0; i < this->params.Get<int>("num_of_dofs"); ++i) { file << joint_pos[i] << ","; }
     for(int i = 0; i < this->params.Get<int>("num_of_dofs"); ++i) { file << joint_pos_target[i] << ","; }
@@ -660,8 +1014,9 @@ void RL::CSVLoggerObs(
 // Writes <policy_dir>/<robot>/trace.csv. Runs from construction to destruction
 // of the RL_Real instance, independent of whether the RL policy is active.
 // Schema (one row per tick):
-//   t_sec, fsm_state, cmd(3), base_ang_vel(3), base_quat(4), dof_pos(n),
-//   dof_pos_target(n), dof_vel(n), action(n)
+//   t_sec, fsm_state, cmd(3), base_ang_vel(3), base_quat(4), projected_gravity(3), dof_pos(n),
+//   dof_pos_target(n), dof_vel(n), action(n),
+//   root_pos_relative_z(1), cee_root_rot_6d(6), key_body_pos_relative(13*3), progress(1)
 // Where `dof_pos_target` is the q_cmd actually being written to low-level PD
 // (GetUp interpolator output, RL policy output, or hold pose in Passive).
 // ============================================================================
@@ -676,10 +1031,18 @@ void RL::CSVInitTrace(std::string robot_path, std::string filename)
     file << "cmd_x,cmd_y,cmd_yaw,";
     file << "base_ang_vel_x,base_ang_vel_y,base_ang_vel_z,";
     file << "base_quat_w,base_quat_x,base_quat_y,base_quat_z,";
+    file << "projected_gravity_x,projected_gravity_y,projected_gravity_z,";
     for (int i = 0; i < n; ++i) { file << "dof_pos_" << i << ","; }
     for (int i = 0; i < n; ++i) { file << "dof_pos_target_" << i << ","; }
     for (int i = 0; i < n; ++i) { file << "dof_vel_" << i << ","; }
+    for (int i = 0; i < n; ++i) { file << "policy_delta_" << i << ","; }
     for (int i = 0; i < n; ++i) { file << "action_" << i << ","; }
+    // Dance-specific observation terms (written for all states; non-dance defaults to zeros).
+    file << "root_pos_relative_z,";
+    file << "cee_tangent_x,cee_tangent_y,cee_tangent_z,";
+    file << "cee_normal_x,cee_normal_y,cee_normal_z,";
+    for (int i = 0; i < 13 * 3; ++i) { file << "key_body_pos_relative_" << i << ","; }
+    file << "progress,";
 
     file << std::endl;
     file.close();
@@ -691,9 +1054,11 @@ void RL::CSVLoggerTrace(
     const std::vector<float>& commands,
     const std::vector<float>& base_ang_vel,
     const std::vector<float>& base_quat,
+    const std::vector<float>& projected_gravity,
     const std::vector<float>& dof_pos,
     const std::vector<float>& dof_pos_target,
     const std::vector<float>& dof_vel,
+    const std::vector<float>& policy_delta,
     const std::vector<float>& actions)
 {
     std::ofstream file(csv_filename.c_str(), std::ios_base::app);
@@ -704,11 +1069,131 @@ void RL::CSVLoggerTrace(
     CsvWriteFixed(file, commands, 3);
     CsvWriteFixed(file, base_ang_vel, 3);
     CsvWriteFixed(file, base_quat, 4);
+    CsvWriteFixed(file, projected_gravity, 3);
     CsvWriteFixed(file, dof_pos, n);
     CsvWriteFixed(file, dof_pos_target, n);
     CsvWriteFixed(file, dof_vel, n);
+    CsvWriteFixed(file, policy_delta, n);
     CsvWriteFixed(file, actions, n);
 
+    // ------------------------------------------------------------------------
+    // Dance observation extras for offline alignment/debug:
+    //   root_pos_relative / cee(root_rot_6d) / key_body_pos_relative / progress
+    // Use the exact same math/layout as ComputeObservation() to avoid train-deploy drift.
+    // ------------------------------------------------------------------------
+    float root_z = 0.0f;
+    if (this->obs.base_pos.size() >= 3)
+    {
+        root_z = this->obs.base_pos[2];
+    }
+    file << root_z << ",";
+
+    std::vector<float> root_rot_6d(6, 0.0f);
+    if (this->obs.base_quat.size() == 4)
+    {
+        const std::vector<float> tangent = QuatApply(this->obs.base_quat, {1.0f, 0.0f, 0.0f});
+        const std::vector<float> normal = QuatApply(this->obs.base_quat, {0.0f, 0.0f, 1.0f});
+        root_rot_6d = {
+            tangent[0], tangent[1], tangent[2],
+            normal[0], normal[1], normal[2]
+        };
+        if (this->params.Get<bool>("root_rot_6d_swap_xy", false))
+        {
+            std::swap(root_rot_6d[0], root_rot_6d[1]);
+            std::swap(root_rot_6d[3], root_rot_6d[4]);
+        }
+    }
+    CsvWriteFixed(file, root_rot_6d, 6);
+
+    const std::vector<int> default_key_body_joint_indices = {9, 10, 13, 14, 17, 18, 20, 19, 5, 7, 6, 12, 11};
+    const auto key_body_joint_indices = this->params.Get<std::vector<int>>(
+        "key_body_joint_indices", default_key_body_joint_indices
+    );
+    std::vector<float> key_body_pos_relative;
+    key_body_pos_relative.reserve(key_body_joint_indices.size() * 3);
+    const bool has_key_body_cache =
+        !this->obs.key_body_pos_rel.empty() &&
+        this->obs.key_body_pos_rel.size() >= static_cast<size_t>(this->params.Get<int>("num_of_dofs")) * 3;
+    if (has_key_body_cache)
+    {
+        for (int joint_idx : key_body_joint_indices)
+        {
+            const int base = joint_idx * 3;
+            if (joint_idx >= 0 && base + 2 < static_cast<int>(this->obs.key_body_pos_rel.size()))
+            {
+                key_body_pos_relative.push_back(this->obs.key_body_pos_rel[base + 0]);
+                key_body_pos_relative.push_back(this->obs.key_body_pos_rel[base + 1]);
+                key_body_pos_relative.push_back(this->obs.key_body_pos_rel[base + 2]);
+            }
+            else
+            {
+                key_body_pos_relative.insert(key_body_pos_relative.end(), {0.0f, 0.0f, 0.0f});
+            }
+        }
+    }
+    else
+    {
+        key_body_pos_relative.assign(key_body_joint_indices.size() * 3, 0.0f);
+    }
+    CsvWriteFixed(file, key_body_pos_relative, 13 * 3);
+
+    float progress = 0.0f;
+    if (this->config_name == "whole_body_tracking")
+    {
+        const int max_episode_length = this->params.Get<int>("max_episode_length", -1);
+        if (max_episode_length > 1 && this->episode_length_buf >= 1)
+        {
+            progress = static_cast<float>(this->episode_length_buf - 1) /
+                       static_cast<float>(max_episode_length - 1);
+        }
+        progress = std::clamp(progress, 0.0f, 1.0f);
+    }
+    file << progress << ",";
+
+    file << std::endl;
+    file.close();
+}
+
+void RL::CSVInitPolicyObs(const std::string& robot_path, int obs_dim, const std::string& filename)
+{
+    this->policy_obs_csv_filename = std::string(POLICY_DIR) + "/" + robot_path + "/" + filename;
+    std::ofstream file(this->policy_obs_csv_filename.c_str());
+    file << "episode_step,progress";
+    for (int i = 0; i < obs_dim; ++i)
+    {
+        file << ",obs_" << i;
+    }
+    for (int i = 0; i < this->params.Get<int>("num_of_dofs"); ++i)
+    {
+        file << ",action_" << i;
+    }
+    file << std::endl;
+    file.close();
+}
+
+void RL::CSVLoggerPolicyObs(int episode_step, float progress,
+                            const std::vector<float>& policy_obs,
+                            const std::vector<float>& actions)
+{
+    if (this->policy_obs_csv_filename.empty())
+    {
+        return;
+    }
+
+    std::ofstream file(this->policy_obs_csv_filename.c_str(), std::ios_base::app);
+    file << std::fixed << std::setprecision(6);
+    file << episode_step << "," << progress << ",";
+    CsvWriteFixed(file, policy_obs, static_cast<int>(policy_obs.size()));
+    file << std::fixed << std::setprecision(4);
+    const int n_actions = static_cast<int>(actions.size());
+    for (int i = 0; i < n_actions; ++i)
+    {
+        file << (i < n_actions ? actions[i] : 0.0f);
+        if (i + 1 < n_actions)
+        {
+            file << ",";
+        }
+    }
     file << std::endl;
     file.close();
 }
@@ -774,13 +1259,31 @@ bool RLFSMState::Interpolate(
 void RLFSMState::RLControl()
 {
     std::vector<float> _output_dof_pos, _output_dof_vel;
-    bool has_new_output = rl.output_dof_pos_queue.try_pop(_output_dof_pos) &&
-                          rl.output_dof_vel_queue.try_pop(_output_dof_vel);
+    const bool has_new_pos = rl.output_dof_pos_queue.try_pop(_output_dof_pos);
+    const bool has_new_vel = rl.output_dof_vel_queue.try_pop(_output_dof_vel);
+    bool has_new_output = has_new_pos || has_new_vel;
+
+    // Avoid dropping a valid packet when pos/vel queues are briefly out-of-sync.
+    // Reuse the previous counterpart from blend targets when only one side is available.
+    if (has_new_pos && !has_new_vel)
+    {
+        _output_dof_vel = rl.rl_blend_dq_target;
+    }
+    else if (!has_new_pos && has_new_vel)
+    {
+        _output_dof_pos = rl.rl_blend_q_target;
+    }
 
     if (has_new_output)
     {
-        rl.rl_blend_q_target = _output_dof_pos;
-        rl.rl_blend_dq_target = _output_dof_vel;
+        if (!_output_dof_pos.empty())
+        {
+            rl.rl_blend_q_target = _output_dof_pos;
+        }
+        if (!_output_dof_vel.empty())
+        {
+            rl.rl_blend_dq_target = _output_dof_vel;
+        }
     }
 
     if (rl.rl_wait_first_frame && !has_new_output)
@@ -829,7 +1332,11 @@ void RLFSMState::RLControl()
         for (int i = 0; i < num_dofs; ++i)
         {
             float q_hold = hold_size_valid ? rl.hold_q_on_enter[i] : fsm_state->motor_state.q[i];
-            float q_target = blend_size_valid ? rl.rl_blend_q_target[i] : q_hold;
+            float q_target = q_hold;
+            if (blend_size_valid)
+            {
+                q_target = rl.rl_blend_q_target[i];
+            }
             float dq_target = blend_size_valid ? rl.rl_blend_dq_target[i] : 0.0f;
 
             fsm_command->motor_command.q[i] = (1.0f - smooth_alpha) * q_hold + smooth_alpha * q_target;

@@ -36,8 +36,9 @@ bool TorchModel::load(const std::string& model_path)
     try
     {
 #ifdef USE_TORCH
-        // Load TorchScript model
-        model_ = torch::jit::load(model_path);
+        // Load TorchScript model onto CPU explicitly.
+        // This keeps deployment robust when the JIT archive was exported from CUDA (e.g. cuda:0 tensors).
+        model_ = torch::jit::load(model_path, torch::kCPU);
         model_path_ = model_path;
         loaded_ = true;
         std::cout << LOGGER::INFO << "Successfully loaded Torch model: " << model_path << std::endl;

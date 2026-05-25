@@ -83,17 +83,33 @@ CMakeFiles/rl_sdk.dir/library/core/rl_sdk/rl_sdk.cpp.s: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green "Compiling CXX source to assembly CMakeFiles/rl_sdk.dir/library/core/rl_sdk/rl_sdk.cpp.s"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/elephant/robot/rl_sar/src/rl_sar/library/core/rl_sdk/rl_sdk.cpp -o CMakeFiles/rl_sdk.dir/library/core/rl_sdk/rl_sdk.cpp.s
 
+CMakeFiles/rl_sdk.dir/library/core/kinematics/kinematics_fk.cpp.o: CMakeFiles/rl_sdk.dir/flags.make
+CMakeFiles/rl_sdk.dir/library/core/kinematics/kinematics_fk.cpp.o: /home/elephant/robot/rl_sar/src/rl_sar/library/core/kinematics/kinematics_fk.cpp
+CMakeFiles/rl_sdk.dir/library/core/kinematics/kinematics_fk.cpp.o: CMakeFiles/rl_sdk.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green --progress-dir=/home/elephant/robot/rl_sar/build_mujoco_test/CMakeFiles --progress-num=$(CMAKE_PROGRESS_2) "Building CXX object CMakeFiles/rl_sdk.dir/library/core/kinematics/kinematics_fk.cpp.o"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/rl_sdk.dir/library/core/kinematics/kinematics_fk.cpp.o -MF CMakeFiles/rl_sdk.dir/library/core/kinematics/kinematics_fk.cpp.o.d -o CMakeFiles/rl_sdk.dir/library/core/kinematics/kinematics_fk.cpp.o -c /home/elephant/robot/rl_sar/src/rl_sar/library/core/kinematics/kinematics_fk.cpp
+
+CMakeFiles/rl_sdk.dir/library/core/kinematics/kinematics_fk.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green "Preprocessing CXX source to CMakeFiles/rl_sdk.dir/library/core/kinematics/kinematics_fk.cpp.i"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/elephant/robot/rl_sar/src/rl_sar/library/core/kinematics/kinematics_fk.cpp > CMakeFiles/rl_sdk.dir/library/core/kinematics/kinematics_fk.cpp.i
+
+CMakeFiles/rl_sdk.dir/library/core/kinematics/kinematics_fk.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green "Compiling CXX source to assembly CMakeFiles/rl_sdk.dir/library/core/kinematics/kinematics_fk.cpp.s"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/elephant/robot/rl_sar/src/rl_sar/library/core/kinematics/kinematics_fk.cpp -o CMakeFiles/rl_sdk.dir/library/core/kinematics/kinematics_fk.cpp.s
+
 # Object files for target rl_sdk
 rl_sdk_OBJECTS = \
-"CMakeFiles/rl_sdk.dir/library/core/rl_sdk/rl_sdk.cpp.o"
+"CMakeFiles/rl_sdk.dir/library/core/rl_sdk/rl_sdk.cpp.o" \
+"CMakeFiles/rl_sdk.dir/library/core/kinematics/kinematics_fk.cpp.o"
 
 # External object files for target rl_sdk
 rl_sdk_EXTERNAL_OBJECTS =
 
 lib/librl_sdk.a: CMakeFiles/rl_sdk.dir/library/core/rl_sdk/rl_sdk.cpp.o
+lib/librl_sdk.a: CMakeFiles/rl_sdk.dir/library/core/kinematics/kinematics_fk.cpp.o
 lib/librl_sdk.a: CMakeFiles/rl_sdk.dir/build.make
 lib/librl_sdk.a: CMakeFiles/rl_sdk.dir/link.txt
-	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green --bold --progress-dir=/home/elephant/robot/rl_sar/build_mujoco_test/CMakeFiles --progress-num=$(CMAKE_PROGRESS_2) "Linking CXX static library lib/librl_sdk.a"
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green --bold --progress-dir=/home/elephant/robot/rl_sar/build_mujoco_test/CMakeFiles --progress-num=$(CMAKE_PROGRESS_3) "Linking CXX static library lib/librl_sdk.a"
 	$(CMAKE_COMMAND) -P CMakeFiles/rl_sdk.dir/cmake_clean_target.cmake
 	$(CMAKE_COMMAND) -E cmake_link_script CMakeFiles/rl_sdk.dir/link.txt --verbose=$(VERBOSE)
 

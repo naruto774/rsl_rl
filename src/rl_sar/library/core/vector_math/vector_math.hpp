@@ -517,6 +517,126 @@ inline std::vector<float> QuatRotateInverse(const std::vector<float>& q, const s
 }
 
 /**
+ * @brief Rotate a vector by a quaternion (forward rotation).
+ * Matches Isaac Lab math.quat_apply(): v' = v + w*(2*(q_xyz x v)) + q_xyz x (2*(q_xyz x v)).
+ */
+inline std::vector<float> QuatApply(const std::vector<float>& q, const std::vector<float>& v)
+{
+    const float q_w = q[0];
+    const float q_x = q[1];
+    const float q_y = q[2];
+    const float q_z = q[3];
+
+    const float v_x = v[0];
+    const float v_y = v[1];
+    const float v_z = v[2];
+
+    const float t_x = 2.0f * (q_y * v_z - q_z * v_y);
+    const float t_y = 2.0f * (q_z * v_x - q_x * v_z);
+    const float t_z = 2.0f * (q_x * v_y - q_y * v_x);
+
+    return {
+        v_x + q_w * t_x + (q_y * t_z - q_z * t_y),
+        v_y + q_w * t_y + (q_z * t_x - q_x * t_z),
+        v_z + q_w * t_z + (q_x * t_y - q_y * t_x)
+    };
+}
+
+/**
+ * @brief Convert rotation matrix (row-major 3x3) to quaternion [w, x, y, z].
+ */
+inline std::vector<float> RotationMatrixToQuaternion(const std::vector<float>& mat)
+{
+    if (static_cast<int>(mat.size()) < 9)
+    {
+        return {1.0f, 0.0f, 0.0f, 0.0f};
+    }
+
+    const float r00 = mat[0];
+    const float r01 = mat[1];
+    const float r02 = mat[2];
+    const float r10 = mat[3];
+    const float r11 = mat[4];
+    const float r12 = mat[5];
+    const float r20 = mat[6];
+    const float r21 = mat[7];
+    const float r22 = mat[8];
+
+    float w = 1.0f;
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
+    const float trace = r00 + r11 + r22;
+
+    if (trace > 0.0f)
+    {
+        const float s = std::sqrt(trace + 1.0f) * 2.0f;
+        w = 0.25f * s;
+        x = (r21 - r12) / s;
+        y = (r02 - r20) / s;
+        z = (r10 - r01) / s;
+    }
+    else if (r00 > r11 && r00 > r22)
+    {
+        const float s = std::sqrt(1.0f + r00 - r11 - r22) * 2.0f;
+        w = (r21 - r12) / s;
+        x = 0.25f * s;
+        y = (r01 + r10) / s;
+        z = (r02 + r20) / s;
+    }
+    else if (r11 > r22)
+    {
+        const float s = std::sqrt(1.0f + r11 - r00 - r22) * 2.0f;
+        w = (r02 - r20) / s;
+        x = (r01 + r10) / s;
+        y = 0.25f * s;
+        z = (r12 + r21) / s;
+    }
+    else
+    {
+        const float s = std::sqrt(1.0f + r22 - r00 - r11) * 2.0f;
+        w = (r10 - r01) / s;
+        x = (r02 + r20) / s;
+        y = (r12 + r21) / s;
+        z = 0.25f * s;
+    }
+
+    return QuaternionNormalize({w, x, y, z});
+}
+
+/**
+ * @brief Build quaternion from Isaac-style tangent + normal 6D observation.
+ * tangent = quat_apply(q, [1,0,0]), normal = quat_apply(q, [0,0,1]).
+ */
+inline std::vector<float> TangentNormal6DToQuaternion(float tx, float ty, float tz, float nx, float ny, float nz)
+{
+    auto normalize3 = [](float vx, float vy, float vz) {
+        const float n = std::sqrt(vx * vx + vy * vy + vz * vz);
+        if (n < 1e-8f)
+        {
+            return std::vector<float>{1.0f, 0.0f, 0.0f};
+        }
+        return std::vector<float>{vx / n, vy / n, vz / n};
+    };
+
+    const std::vector<float> tangent = normalize3(tx, ty, tz);
+    const std::vector<float> normal = normalize3(nx, ny, nz);
+    const std::vector<float> cross_nt = {
+        normal[1] * tangent[2] - normal[2] * tangent[1],
+        normal[2] * tangent[0] - normal[0] * tangent[2],
+        normal[0] * tangent[1] - normal[1] * tangent[0]
+    };
+    const std::vector<float> bitangent = normalize3(cross_nt[0], cross_nt[1], cross_nt[2]);
+
+    const std::vector<float> rot_matrix = {
+        tangent[0], bitangent[0], normal[0],
+        tangent[1], bitangent[1], normal[1],
+        tangent[2], bitangent[2], normal[2]
+    };
+    return RotationMatrixToQuaternion(rot_matrix);
+}
+
+/**
  * @brief Convert quaternion to rotation matrix (3x3)
  * @param q Quaternion [w, x, y, z]
  * @return Rotation matrix as vector of 9 elements [row-major: R00, R01, R02, R10, R11, ...]

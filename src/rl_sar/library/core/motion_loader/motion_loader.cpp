@@ -18,6 +18,11 @@ MotionLoader::MotionLoader(const std::string& motion_file, float fps)
               << num_joints_ << " joints, duration=" << duration_ << "s" << std::endl;
 }
 
+void MotionLoader::SetAnchorJointIndices(const std::vector<int>& indices)
+{
+    anchor_joint_indices_ = indices;
+}
+
 void MotionLoader::LoadFromCSV(const std::string& filename)
 {
     std::ifstream file(filename);
@@ -165,11 +170,27 @@ std::vector<float> MotionLoader::GetRootQuat() const
     return q;
 }
 
+std::vector<float> MotionLoader::GetRootPos() const
+{
+    std::vector<float> result(3, 0.0f);
+    const auto& p0 = root_positions_[index_0_];
+    const auto& p1 = root_positions_[index_1_];
+    for (size_t i = 0; i < 3 && i < p0.size() && i < p1.size(); ++i)
+    {
+        result[i] = p0[i] * (1.0f - blend_) + p1[i] * blend_;
+    }
+    return result;
+}
+
 std::vector<float> MotionLoader::ComputeTorsoQuat(const std::vector<float>& base_quat, const std::vector<float>& waist_angles)
 {
-    std::vector<float> q_yaw = QuaternionFromAxisAngle({0.0f, 0.0f, 1.0f}, waist_angles[0]);
-    std::vector<float> q_roll = QuaternionFromAxisAngle({1.0f, 0.0f, 0.0f}, waist_angles[1]);
-    std::vector<float> q_pitch = QuaternionFromAxisAngle({0.0f, 1.0f, 0.0f}, waist_angles[2]);
+    const float yaw = waist_angles.size() > 0 ? waist_angles[0] : 0.0f;
+    const float roll = waist_angles.size() > 1 ? waist_angles[1] : 0.0f;
+    const float pitch = waist_angles.size() > 2 ? waist_angles[2] : 0.0f;
+
+    std::vector<float> q_yaw = QuaternionFromAxisAngle({0.0f, 0.0f, 1.0f}, yaw);
+    std::vector<float> q_roll = QuaternionFromAxisAngle({1.0f, 0.0f, 0.0f}, roll);
+    std::vector<float> q_pitch = QuaternionFromAxisAngle({0.0f, 1.0f, 0.0f}, pitch);
 
     std::vector<float> torso_quat = QuaternionMultiply(base_quat, q_yaw);
     torso_quat = QuaternionMultiply(torso_quat, q_roll);
@@ -189,12 +210,15 @@ std::vector<float> MotionLoader::GetAnchorQuat() const
 {
     std::vector<float> root_quat = Slerp(root_quaternions_[index_0_], root_quaternions_[index_1_], blend_);
     auto joint_pos = GetJointPos();
-
-    const int WAIST_YAW_IDX = 12;
-    const int WAIST_ROLL_IDX = 13;
-    const int WAIST_PITCH_IDX = 14;
-
-    std::vector<float> waist_angles = {joint_pos[WAIST_YAW_IDX], joint_pos[WAIST_ROLL_IDX], joint_pos[WAIST_PITCH_IDX]};
+    std::vector<float> waist_angles(3, 0.0f);  // [yaw, roll, pitch]
+    for (size_t i = 0; i < std::min<size_t>(3, anchor_joint_indices_.size()); ++i)
+    {
+        const int idx = anchor_joint_indices_[i];
+        if (idx >= 0 && idx < static_cast<int>(joint_pos.size()))
+        {
+            waist_angles[i] = joint_pos[idx];
+        }
+    }
     return ComputeTorsoQuat(root_quat, waist_angles);
 }
 

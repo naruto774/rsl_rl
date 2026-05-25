@@ -63,6 +63,32 @@ private:
     void RunModel();
     void RobotControl();
 
+    // 当 InitRL 加载新的 policy config（locomotion <-> whole_body_tracking）后，
+    // RL 基类会调用本回调。我们在这里：
+    //   1. 按新 config 的 policy_step_time 热切换 loop_rl 周期，
+    //      保证 dance 走 60Hz、locomotion 走 dt*decimation；
+    //   2. 首次进入 whole_body_tracking 时打印安全告警；
+    //   3. 切到 whole_body_tracking 时加载 default_pose_static_ref.yaml，
+    //      把 root_z + key_body_pos_rel 的离线 FK 结果作为静态参考。
+    void OnPolicyConfigLoaded() override;
+    void UpdatePolicyLoopPeriod();
+    bool LoadDanceStaticRef();
+    std::string last_loaded_config_name;
+
+    // Dance 模式下用于填充 obs 中缺失的笛卡尔观测的静态参考：
+    //   * dance_root_z_ref         : 训练标称的初始质心高度（来自 yaml 的 root_z_ref）；
+    //                                注意 base_pos.z 实机没法实测（无外部位姿估计），
+    //                                只能用这个静态值；这部分残留 OOD 不可避免。
+    //   * dance_key_body_ref       : 21*3=63 维，layout 与 rl_sim_mujoco 写入 obs.key_body_pos_rel 一致；
+    //                                只有在在线 FK 不可用时作为静态 fallback 使用。
+    //   * dance_static_ref_loaded  : 静态参考 yaml 是否加载成功。
+    //   * dance_online_fk_enabled  : 在线 FK 是否就绪（MJCF 已加载 + USE_MUJOCO 链接成功）；
+    //                                优先级高于静态参考。
+    float dance_root_z_ref = 0.0f;
+    std::vector<float> dance_key_body_ref;
+    bool dance_static_ref_loaded = false;
+    bool dance_online_fk_enabled = false;
+
     // loop
     std::shared_ptr<LoopFunc> loop_keyboard;
     std::shared_ptr<LoopFunc> loop_control;

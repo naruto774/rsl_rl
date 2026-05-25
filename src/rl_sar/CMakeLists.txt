@@ -359,6 +359,7 @@ include_directories(
     library/core/motion_loader
     library/core/inference_runtime
     library/core/logger
+    library/core/kinematics
     fsm_robot
 )
 
@@ -386,7 +387,13 @@ endif()
 add_library(motion_loader library/core/motion_loader/motion_loader.cpp)
 
 # library for rl sdk
-add_library(rl_sdk library/core/rl_sdk/rl_sdk.cpp)
+# kinematics_fk.cpp 用条件编译保护 MuJoCo 调用，USE_MUJOCO=OFF 时它内部全是 stub，
+# 不需要链接 mujoco_prebuilt 也能正常编译；USE_MUJOCO=ON 时下面的 MuJoCo 段
+# 会给 rl_sdk 追加 mujoco_prebuilt 和 USE_MUJOCO 宏。
+add_library(rl_sdk
+    library/core/rl_sdk/rl_sdk.cpp
+    library/core/kinematics/kinematics_fk.cpp
+)
 target_link_libraries(rl_sdk PUBLIC
     motion_loader
     inference_runtime
@@ -751,6 +758,17 @@ if(USE_MUJOCO)
 
     install(TARGETS rl_sim_mujoco DESTINATION bin)
     install(TARGETS mujoco_data_collection DESTINATION lib/${PROJECT_NAME})
+
+    # ----------------------------------------------------------------------
+    # 把 MuJoCo 头/库注入 rl_sdk，让 kinematics_fk.cpp 走 USE_MUJOCO 分支
+    # （实机部署 RL_Real::OnPolicyConfigLoaded 里在线 FK 的依赖）。
+    # 这里用 PRIVATE 是因为 KinematicsFK 在 rl_sdk.hpp 里只 forward-declare，
+    # 用户不需要看到 <mujoco/mujoco.h>，避免污染所有 backend 的 include 链。
+    # ----------------------------------------------------------------------
+    target_link_libraries(rl_sdk PRIVATE mujoco_prebuilt)
+    target_compile_definitions(rl_sdk PRIVATE USE_MUJOCO)
+    target_include_directories(rl_sdk PRIVATE ${MUJOCO_INCLUDE_DIR})
+
     message(STATUS "MuJoCo configured: ${MUJOCO_DIR}")
 endif()
 

@@ -1,7 +1,7 @@
 seed: 42
 device: cuda:0
 num_steps_per_env: 24
-max_iterations: 20000
+max_iterations: 12000
 empirical_normalization: {}
 policy:
   class_name: ActorCritic

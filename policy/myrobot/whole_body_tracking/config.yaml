@@ -1,0 +1,130 @@
+# Copyright (c) 2024-2025 Ziqi Fan
+# SPDX-License-Identifier: Apache-2.0
+
+myrobot/whole_body_tracking:
+  model_name: "policy.pt"
+  num_observations: 89
+  observations: ["whole_body_tracking/joint_pos", "whole_body_tracking/joint_vel", "whole_body_tracking/root_pos_relative", "whole_body_tracking/ref_body_quat_tan_norm", "whole_body_tracking/key_body_pos_relative", "whole_body_tracking/progress"]
+  observations_history: []  # 0 is the latest observation
+  observations_history_priority: "time"  # "time" or "term" priority
+  # Sim2sim alignment with Isaac training (myrobot_amp): 60Hz policy, 21.7s episode.
+  policy_step_time: 0.0166666667  # 1/60 s
+  episode_duration_seconds: 21.7
+  max_episode_length: 1302  # round(21.7 * 60)
+  # Phase A sim2sim: teleport MuJoCo to Isaac ampobs row on Dance Enter.
+  # H-3 revisited: telemetry showed amp row 0 base orientation = +Y (not +X like
+  # Mujoco default), so RSI-style spawn from ampobs row is required for progress=0.
+  enable_sim2sim_init_pose: true
+  sim2sim_init_pose_file: "ampobs.csv"
+  sim2sim_init_pose_row: 0
+  # For ref_body_quat_tan_norm: quaternion_to_tangent_and_normal (no swap).
+  root_rot_6d_swap_xy: false
+  clip_obs: 100.0
+  clip_actions_lower: [-100.0, -100.0, -100.0,
+                       -100.0, -100.0, -100.0,
+                       -100.0, -100.0, -100.0,
+                       -100.0, -100.0, -100.0, 
+                       -100.0, -100.0, -100.0,
+                       -100.0, -100.0, -100.0, 
+                       -100.0, -100.0, -100.0]
+  clip_actions_upper: [100.0, 100.0, 100.0,
+                       100.0, 100.0, 100.0,
+                       100.0, 100.0, 100.0,
+                       100.0, 100.0, 100.0, 
+                       100.0, 100.0, 100.0,
+                       100.0, 100.0, 100.0, 
+                       100.0, 100.0, 100.0]
+  # PD gains aligned with policy/myrobot/params/env.yaml ImplicitActuator stiffness/damping.
+  rl_kp: [8, 8, 24, 8, 8, 24, 8, 
+          8, 5, 8, 8, 8, 8, 24, 
+          24, 6, 6, 5, 5, 6, 6]
+
+  rl_kd: [1, 1, 1, 1, 1, 1, 1, 
+        1, 1, 1, 1, 1, 1, 1, 
+        1, 1, 1, 1, 1, 1, 1]
+  fixed_kp: [7.79, 7.79, 14.1, 7.79, 7.79, 14.1, 7.79, 
+             7.79, 7.79, 7.79, 7.79, 7.79, 7.79, 14.1, 
+             14.1, 5.54, 5.54, 4.71, 4.71, 10, 10]
+
+  fixed_kd: [0.12, 0.12, 1.48, 0.12, 0.12, 1.48, 0.12, 
+        0.12, 0.12, 0.12, 0.12, 0.12, 0.12, 1.48, 
+        1.48, 0.5, 0.5, 0.12, 0.12, 0.123, 0.123]
+  num_of_dofs: 21
+  root_z_ref: 0.25
+  #mujoco
+  action_scale: [0.000, 0.000,  #0~1      hip pitch
+                 1.000,        #2        waist pitch
+                 0.000, 0.000,  #3~4      hip roll
+                 1.000,        #5        waist_yaw
+                 1.000, 1.000,  #6~7      hip yaw
+                 0.0,         #8        head                     
+                 1.000, 1.000,  #9~10     shoulder pitch
+                 1.000, 1.000,  #11~12    knee
+                 1.000, 1.000,  #13~14    shoulder roll
+                 0.000, 0.000,  #10~16    ankle pitch
+                 1.000, 1.000,  #17~18    elbow
+                 0.000, 0.000]  #19~7.79    ankle roll
+  #real
+  # action_scale: [0.100000, 0.100000,  #0~1      hip pitch
+  #           0.100000,        #2        waist pitch
+  #           0.100000, 0.100000,  #3~4      hip roll
+  #           0.100000,        #5        waist_yaw
+  #           0.100000, 0.100000,  #6~7      hip yaw
+  #           0.0,         #8        head                     
+  #           0.100000, 0.100000,  #9~10     shoulder pitch
+  #           0.100000, 0.100000,  #11~12    knee
+  #           0.100000, 0.100000,  #13~14    shoulder roll
+  #           0.100000, 0.100000,  #10~16    ankle pitch
+  #           0.100000, 0.100000,  #17~18    elbow
+  #           0.100000, 0.100000]  #19~7.79    ankle roll
+  action_type: "absolute_position"
+  # Sim2sim alignment for dance policy:
+  # q_target = offset + (q_max_soft - q_min_soft) * action
+  # offset = (q_max_soft + q_min_soft) / 2
+  use_soft_joint_pos_action: true
+  soft_limit_apply_action_scale: true
+  # Ablation: disable deployment-only target modifiers (training has none).
+  rl_blend_duration: 0.0
+  # Dance startup smooth handover: blend from entry pose to policy target for
+  # at least this duration, preventing first-frame q_target jump.
+  dance_min_startup_blend_duration: 0.5
+  enable_action_ramp: false
+  action_ramp_duration: 0.0
+  enable_q_target_clamp: true
+  q_target_lower: [-1.365, -1.365, -0.72, -0.45, -0.45, -0.72, -0.54, -0.54, 0.0, -0.72, -0.72, -0.1, -0.1, -0.72, -0.72, -0.72, -0.72, -0.72, -0.72, -0.36, -0.36]
+  q_target_upper: [1.065, 1.065, 0.72, 0.45, 0.45, 0.72, 0.54, 0.54, 0.0, 0.72, 0.72, 1.7, 1.7, 0.72, 0.72, 0.72, 0.72, 0.72, 0.72, 0.36, 0.36]
+  enable_q_target_rate_limit: false
+  q_target_max_step_scalar: 1.0
+  soft_joint_pos_min: [-1.365, -1.365, -0.72, -0.45, -0.45, -0.72, -0.54, -0.54, 0.0, -0.72, -0.72, -0.1, -0.1, -0.72, -0.72, -0.72, -0.72, -0.72, -0.72, -0.36, -0.36]
+  soft_joint_pos_max: [1.065, 1.065, 0.72, 0.45, 0.45, 0.72, 0.54, 0.54, 0.0, 0.72, 0.72, 1.7, 1.7, 0.72, 0.72, 0.72, 0.72, 0.72, 0.72, 0.36, 0.36]
+  action_deadzone_lower: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  action_deadzone_upper: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  wheel_indices: []
+  lin_vel_scale: 1.0
+  ang_vel_scale: 1.0
+  dof_pos_scale: 1.0
+  dof_vel_scale: 1.0
+  commands_scale: [1.0, 1.0, 1.0]
+  torque_limits: [1.96, 1.96, 2.94,
+                1.96, 1.96, 2.94,
+                1.96, 1.96, 0.441,
+                17.7, 17.7,
+                1.96, 1.96,
+                1.96, 1.96,
+                2.942, 2.942,
+                0.441, 0.441,
+                2.942, 2.942]
+#   default_dof_pos: [-0.3, -0.3,0.0, 0.05, -0.05, 0.0, 0.004, -0.004, 
+#                     0.0, 0.0, 0.0,
+#                     0.5, 0.5, 0.0, 0.0, 
+#                     -0.2, -0.2, 0.0, 0.0, -0.06, 0.06]
+  default_dof_pos: [-0.0, -0.0,0.0, 0.00, -0.00, 0.0, 0.00, -0.00, 
+                    0.0, 0.0, 0.0,
+                    0.0, 0.0, 0.0, 0.0, 
+                    -0.0, -0.0, 0.0, 0.0, -0.00, 0.0]
+  joint_mapping: [0, 6, 13, 1, 7, 12, 2, 8, 20, 14, 17, 3, 9, 15, 18, 4, 10, 16, 19, 5, 11]
+  # key body order:
+  # left_shoulder_pitch, right_shoulder_pitch, left_shoulder_roll, right_shoulder_roll,
+  # left_elbow, right_elbow, right_ankle_roll, left_ankle_roll, waist_yaw,
+  # right_hip_yaw, left_hip_yaw, right_knee, left_knee
+  key_body_joint_indices: [9, 10, 13, 14, 17, 18, 20, 19, 5, 7, 6, 12, 11]

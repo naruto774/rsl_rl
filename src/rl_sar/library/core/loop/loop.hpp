@@ -46,6 +46,11 @@ public:
         _thread.detach();
     }
 
+    void setPeriod(float period)
+    {
+        _period = period;
+    }
+
     void shutdown()
     {
         {

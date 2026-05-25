@@ -5,6 +5,12 @@
 
 #include "rl_sim_mujoco.hpp"
 
+#include <fstream>
+#include <sstream>
+#include <chrono>
+#include <cmath>
+#include <iomanip>
+
 #ifdef RL_MUJOCO_TEST_CSV
 #include <chrono>
 #include <iomanip>
@@ -20,6 +26,195 @@ static float WrapToPi(float angle)
     while (angle < -kPi) angle += 2.0f * kPi;
     return angle;
 }
+
+namespace {
+
+bool ParseCsvFloatRow(const std::string& line, std::vector<float>& values)
+{
+    values.clear();
+    std::stringstream ss(line);
+    std::string cell;
+    while (std::getline(ss, cell, ','))
+    {
+        if (cell.empty())
+        {
+            values.push_back(0.0f);
+            continue;
+        }
+        try
+        {
+            values.push_back(std::stof(cell));
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+    return !values.empty();
+}
+
+bool LoadAmpObsRow(const std::string& file_path, int row_index, std::vector<float>& obs_row)
+{
+    std::ifstream file(file_path);
+    if (!file.is_open())
+    {
+        return false;
+    }
+
+    std::string line;
+    if (!std::getline(file, line))
+    {
+        return false;
+    }
+
+    for (int i = 0; i <= row_index; ++i)
+    {
+        if (!std::getline(file, line))
+        {
+            return false;
+        }
+        if (i == row_index)
+        {
+            return ParseCsvFloatRow(line, obs_row) && obs_row.size() >= 89;
+        }
+    }
+    return false;
+}
+
+float MaxAbsSliceDiff(const std::vector<float>& a, const std::vector<float>& b, int off, int n)
+{
+    float mx = 0.0f;
+    for (int i = 0; i < n; ++i)
+    {
+        const int idx = off + i;
+        if (idx < 0 || idx >= static_cast<int>(a.size()) || idx >= static_cast<int>(b.size()))
+        {
+            continue;
+        }
+        mx = std::max(mx, std::fabs(a[idx] - b[idx]));
+    }
+    return mx;
+}
+
+float L2SliceDiff(const std::vector<float>& a, const std::vector<float>& b, int off, int n)
+{
+    float sum = 0.0f;
+    for (int i = 0; i < n; ++i)
+    {
+        const int idx = off + i;
+        if (idx < 0 || idx >= static_cast<int>(a.size()) || idx >= static_cast<int>(b.size()))
+        {
+            continue;
+        }
+        const float d = a[idx] - b[idx];
+        sum += d * d;
+    }
+    return std::sqrt(sum);
+}
+
+float ReadMotorDqFromQvel(
+    const mjModel* model,
+    const mjData* data,
+    int actuator_id)
+{
+    if (!model || !data || actuator_id < 0 || actuator_id >= model->nu)
+    {
+        return 0.0f;
+    }
+    const int joint_id = model->actuator_trnid[actuator_id * 2 + 0];
+    if (joint_id < 0 || joint_id >= model->njnt)
+    {
+        return 0.0f;
+    }
+    const int dof_adr = model->jnt_dofadr[joint_id];
+    if (dof_adr < 0 || dof_adr >= model->nv)
+    {
+        return 0.0f;
+    }
+    return static_cast<float>(data->qvel[dof_adr]);
+}
+
+// #region agent log
+// H-1 + H-3: log deploy obs vs amp **same-progress** row (step k -> amp row k-1 after fix),
+// plus stability metric (projected_gravity_z) and full action mapping for H-2.
+void LogObsVsAmpDebug(
+    int step,
+    const std::vector<float>& deploy_obs,
+    const std::vector<float>& deploy_actions,
+    const std::vector<float>& dof_vel,
+    const std::vector<float>& base_quat,
+    const std::vector<float>& proj_gravity,
+    const std::string& amp_path)
+{
+    if (step <= 0 || deploy_obs.size() < 89)
+    {
+        return;
+    }
+    // Sample every step for first 30, then every 30 steps
+    if (step > 30 && (step % 30 != 0)) return;
+
+    const int amp_row_idx = step - 1;  // H-1: deploy step k aligns with amp row k-1
+    std::vector<float> amp_row;
+    const bool have_amp = LoadAmpObsRow(amp_path, amp_row_idx, amp_row) && amp_row.size() >= 89;
+
+    const float progress = deploy_obs[88];
+
+    float diff_joint_pos = 0, diff_joint_vel = 0, diff_root_z = 0, diff_ref6d = 0;
+    float diff_key_body = 0, diff_progress = 0;
+    float deploy_a0 = deploy_actions.empty() ? 0.0f : deploy_actions[0];
+    float amp_a0 = 0.0f, amp_jp0 = 0.0f, amp_jv0 = 0.0f, amp_progress_v = 0.0f;
+    if (have_amp)
+    {
+        diff_joint_pos = MaxAbsSliceDiff(deploy_obs, amp_row, 0, 21);
+        diff_joint_vel = MaxAbsSliceDiff(deploy_obs, amp_row, 21, 21);
+        diff_root_z = MaxAbsSliceDiff(deploy_obs, amp_row, 42, 1);
+        diff_ref6d = MaxAbsSliceDiff(deploy_obs, amp_row, 43, 6);
+        diff_key_body = MaxAbsSliceDiff(deploy_obs, amp_row, 49, 39);
+        amp_progress_v = amp_row[88];
+        diff_progress = std::fabs(progress - amp_progress_v);
+        if (amp_row.size() >= 90) amp_a0 = amp_row[89];
+        amp_jp0 = amp_row[0];
+        amp_jv0 = amp_row[21];
+    }
+
+    float dof_vel_max = 0.0f;
+    for (float v : dof_vel) dof_vel_max = std::max(dof_vel_max, std::fabs(v));
+
+    const auto ts = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+
+    std::ofstream dbg("/home/elephant/robot/rl_sar/.cursor/debug-7b1cbd.log", std::ios::app);
+    if (!dbg.is_open()) return;
+    dbg << std::fixed << std::setprecision(6);
+    dbg << "{\"sessionId\":\"7b1cbd\",\"runId\":\"post-fix-v7\",\"hypothesisId\":\"H1_only\","
+        << "\"location\":\"rl_sim_mujoco.cpp:LogObsVsAmpDebug\","
+        << "\"message\":\"step_metrics\","
+        << "\"timestamp\":" << ts << ","
+        << "\"data\":{"
+        << "\"step\":" << step
+        << ",\"amp_row\":" << amp_row_idx
+        << ",\"progress\":" << progress
+        << ",\"amp_progress\":" << amp_progress_v
+        << ",\"diff_progress\":" << diff_progress
+        << ",\"diff_joint_pos\":" << diff_joint_pos
+        << ",\"diff_joint_vel\":" << diff_joint_vel
+        << ",\"diff_root_z\":" << diff_root_z
+        << ",\"diff_ref6d\":" << diff_ref6d
+        << ",\"diff_key_body\":" << diff_key_body
+        << ",\"deploy_a0\":" << deploy_a0
+        << ",\"amp_a0\":" << amp_a0
+        << ",\"dof_vel0\":" << (dof_vel.empty() ? 0.0f : dof_vel[0])
+        << ",\"amp_jv0\":" << amp_jv0
+        << ",\"deploy_jp0\":" << deploy_obs[0]
+        << ",\"amp_jp0\":" << amp_jp0
+        << ",\"base_qw\":" << (base_quat.size() > 0 ? base_quat[0] : 0.0f)
+        << ",\"proj_grav_z\":" << (proj_gravity.size() > 2 ? proj_gravity[2] : 0.0f)
+        << ",\"dof_vel_max\":" << dof_vel_max
+        << "}}\n";
+}
+// #endregion
+
+}  // namespace
 
 RL_Sim::RL_Sim(int argc, char **argv)
 {
@@ -137,7 +332,7 @@ RL_Sim::RL_Sim(int argc, char **argv)
 
     // loop
     this->loop_control = std::make_shared<LoopFunc>("loop_control", this->params.Get<float>("dt"), std::bind(&RL_Sim::RobotControl, this));
-    this->loop_rl = std::make_shared<LoopFunc>("loop_rl", this->params.Get<float>("dt") * this->params.Get<int>("decimation"), std::bind(&RL_Sim::RunModel, this));
+    this->loop_rl = std::make_shared<LoopFunc>("loop_rl", this->GetPolicyStepTime(), std::bind(&RL_Sim::RunModel, this));
     this->loop_control->start();
     this->loop_rl->start();
 
@@ -227,10 +422,141 @@ void RL_Sim::DrainActionDelayBuffer()
     }
 }
 
+void RL_Sim::UpdatePolicyLoopPeriod()
+{
+    const float period = this->GetPolicyStepTime();
+    if (this->loop_rl)
+    {
+        this->loop_rl->setPeriod(period);
+    }
+    std::cout << LOGGER::INFO << "[PolicyLoop] period=" << period << "s ("
+              << (1.0f / std::max(period, 1e-6f)) << " Hz)" << std::endl;
+}
+
+void RL_Sim::OnPolicyConfigLoaded()
+{
+    this->UpdatePolicyLoopPeriod();
+    if (this->config_name == "whole_body_tracking")
+    {
+        const int obs_dim = this->params.Get<int>("num_observations", 89);
+        this->CSVInitPolicyObs(this->robot_name + "/" + this->config_name, obs_dim, "policy_obs_sim.csv");
+    }
+}
+
+bool RL_Sim::ApplyWholeBodyTrackingInitPoseFromAmpObs()
+{
+    if (!this->params.Get<bool>("enable_sim2sim_init_pose", false))
+    {
+        return false;
+    }
+    if (!this->mj_model || !this->mj_data)
+    {
+        std::cout << LOGGER::WARNING << "[Sim2SimInitPose] MuJoCo model/data unavailable." << std::endl;
+        return false;
+    }
+
+    const std::string pose_file = this->params.Get<std::string>("sim2sim_init_pose_file", "ampobs.csv");
+    const int pose_row = this->params.Get<int>("sim2sim_init_pose_row", 0);
+    const std::string pose_path = std::string(POLICY_DIR) + "/" + this->robot_name + "/" +
+                                  this->config_name + "/" + pose_file;
+
+    std::vector<float> obs_row;
+    if (!LoadAmpObsRow(pose_path, pose_row, obs_row))
+    {
+        std::cout << LOGGER::WARNING << "[Sim2SimInitPose] Failed to load row " << pose_row
+                  << " from " << pose_path << std::endl;
+        return false;
+    }
+
+    const int num_dofs = this->params.Get<int>("num_of_dofs");
+    const auto joint_mapping = this->params.Get<std::vector<int>>("joint_mapping");
+    if (static_cast<int>(joint_mapping.size()) != num_dofs)
+    {
+        std::cout << LOGGER::WARNING << "[Sim2SimInitPose] joint_mapping size mismatch." << std::endl;
+        return false;
+    }
+
+    std::vector<float> joint_pos(num_dofs, 0.0f);
+    for (int i = 0; i < num_dofs; ++i)
+    {
+        joint_pos[i] = obs_row[i];
+    }
+
+    // H-H rejected: writing ampobs joint_vel to qvel did not survive to step1
+    // (mj_forward / RobotControl absorbed it). Keep qvel = 0 on init.
+    const float root_z = obs_row[42];
+    std::vector<float> base_quat = TangentNormal6DToQuaternion(
+        obs_row[43], obs_row[44], obs_row[45], obs_row[46], obs_row[47], obs_row[48]);
+
+    const float root_x = (this->mj_data->qpos[0]);
+    const float root_y = (this->mj_data->qpos[1]);
+
+    this->mj_data->qpos[0] = root_x;
+    this->mj_data->qpos[1] = root_y;
+    this->mj_data->qpos[2] = root_z;
+    if (this->mj_model->nq >= 7)
+    {
+        this->mj_data->qpos[3] = base_quat[0];
+        this->mj_data->qpos[4] = base_quat[1];
+        this->mj_data->qpos[5] = base_quat[2];
+        this->mj_data->qpos[6] = base_quat[3];
+    }
+
+    for (int i = 0; i < num_dofs; ++i)
+    {
+        const int actuator_id = joint_mapping[i];
+        if (actuator_id < 0 || actuator_id >= this->mj_model->nu)
+        {
+            continue;
+        }
+        const int joint_id = this->mj_model->actuator_trnid[actuator_id * 2 + 0];
+        if (joint_id < 0 || joint_id >= this->mj_model->njnt)
+        {
+            continue;
+        }
+        const int qpos_adr = this->mj_model->jnt_qposadr[joint_id];
+        if (qpos_adr >= 0 && qpos_adr < this->mj_model->nq)
+        {
+            this->mj_data->qpos[qpos_adr] = joint_pos[i];
+        }
+    }
+
+    for (int i = 0; i < this->mj_model->nv; ++i)
+    {
+        if (i < 6)
+        {
+            this->mj_data->qvel[i] = 0.0f;
+        }
+    }
+    mj_forward(this->mj_model, this->mj_data);
+
+    this->hold_q_on_enter = joint_pos;
+    this->rl_blend_q_target = joint_pos;
+    this->rl_blend_dq_target.assign(num_dofs, 0.0f);
+    this->ClearActionsHistory();
+
+    std::cout << LOGGER::INFO << "[Sim2SimInitPose] Applied ampobs row " << pose_row
+              << " from " << pose_file << " (root_z=" << root_z
+              << ", progress=" << obs_row[88] << ")" << std::endl;
+    return true;
+}
+
 void RL_Sim::GetState(RobotState<float> *state)
 {
     if (mj_data)
     {
+        // Root position from free-joint qpos (world frame).
+        if (mj_model && mj_model->nq >= 3)
+        {
+            state->base_pos[0] = mj_data->qpos[0];
+            state->base_pos[1] = mj_data->qpos[1];
+            state->base_pos[2] = mj_data->qpos[2];
+        }
+        else
+        {
+            state->base_pos = {0.0f, 0.0f, 0.0f};
+        }
+
         state->imu.quaternion[0] = mj_data->sensordata[3 * this->params.Get<int>("num_of_dofs") + 0]; 
         state->imu.quaternion[1] = mj_data->sensordata[3 * this->params.Get<int>("num_of_dofs") + 1]; 
         state->imu.quaternion[2] = mj_data->sensordata[3 * this->params.Get<int>("num_of_dofs") + 2];
@@ -242,10 +568,12 @@ void RL_Sim::GetState(RobotState<float> *state)
 
         for (int i = 0; i < this->params.Get<int>("num_of_dofs"); ++i)
         {
-            state->motor_state.q[i] = mj_data->sensordata[this->params.Get<std::vector<int>>("joint_mapping")[i]];
-            state->motor_state.dq[i] = mj_data->sensordata[this->params.Get<std::vector<int>>("joint_mapping")[i] + this->params.Get<int>("num_of_dofs")];
-            state->motor_state.tau_est[i] = mj_data->sensordata[this->params.Get<std::vector<int>>("joint_mapping")[i] + 2 * this->params.Get<int>("num_of_dofs")];
+            const int actuator_id = this->params.Get<std::vector<int>>("joint_mapping")[i];
+            state->motor_state.q[i] = mj_data->sensordata[actuator_id];
+            state->motor_state.dq[i] = mj_data->sensordata[actuator_id + this->params.Get<int>("num_of_dofs")];
+            state->motor_state.tau_est[i] = mj_data->sensordata[actuator_id + 2 * this->params.Get<int>("num_of_dofs")];
         }
+
     }
 }
 
@@ -267,6 +595,29 @@ void RL_Sim::RobotControl()
 {
     // Lock the sim mutex once for the entire control cycle to prevent race conditions
     const std::lock_guard<std::recursive_mutex> lock(sim->mtx);
+
+    static Input::Keyboard last_dbg_keyboard = Input::Keyboard::None;
+    static Input::Gamepad last_dbg_gamepad = Input::Gamepad::None;
+
+    // Poll terminal keyboard input each control cycle (Num keys / arrows).
+    this->KeyboardInterface();
+
+    if (this->control.current_keyboard != last_dbg_keyboard ||
+        this->control.current_gamepad != last_dbg_gamepad)
+    {
+        std::string current_state_name = "null";
+        if (this->fsm.current_state_)
+        {
+            current_state_name = this->fsm.current_state_->GetStateName();
+        }
+        std::cout << "\n" << LOGGER::INFO
+                  << "[InputDebug] key=" << static_cast<int>(this->control.current_keyboard)
+                  << " last_key=" << static_cast<int>(this->control.last_keyboard)
+                  << " gamepad=" << static_cast<int>(this->control.current_gamepad)
+                  << " state=" << current_state_name << std::endl;
+        last_dbg_keyboard = this->control.current_keyboard;
+        last_dbg_gamepad = this->control.current_gamepad;
+    }
 
     this->GetState(&this->robot_state);
 
@@ -410,7 +761,7 @@ void RL_Sim::GetSysJoystick()
         this->sys_js_active = false;
     }
 }
-
+    //把仿真状态写进 obs
 void RL_Sim::RunModel()
 {
     if (!(this->rl_init_done && simulation_running))
@@ -420,7 +771,6 @@ void RL_Sim::RunModel()
         return;
     }
 
-    // Sim-to-Real: 首次进入 RL 状态时重采延时（此时 config.yaml 已由 InitRL 加载完毕）
     if (!this->was_rl_init_done_)
     {
         this->was_rl_init_done_ = true;
@@ -436,7 +786,9 @@ void RL_Sim::RunModel()
     AddUniformNoiseInPlace(this->obs.ang_vel, this->params.Get<float>("noise_ang_vel", 0.0f));
     // base_quat 本身不加噪；projected_gravity 的噪声在 rl_sdk.cpp 投影后注入
     this->obs.base_quat = this->robot_state.imu.quaternion;
+    this->obs.base_pos = this->robot_state.base_pos;
 
+    //*************************************航向保持外环代码**************************************** //
     float cmd_yaw_final = this->control.yaw;
     if (this->params.Get<bool>("yaw_hold_enable", false)) //当航向保持开关打开时，执行航向保持外环
     {   
@@ -472,17 +824,51 @@ void RL_Sim::RunModel()
     {
         this->yaw_hold_target_initialized = false;  //将目标航向初始化标志设置为false
     }
+//************************************************************************************************************* //
 
     this->obs.commands = {this->control.x, this->control.y, cmd_yaw_final};
     this->obs.dof_pos = this->robot_state.motor_state.q;
-    // Sim-to-Real: 关节编码器噪声，典型 a≈0.03 rad
+    // Sim-to-Real: 关节编码器噪声，典型 a≈0.03 rad可
     AddUniformNoiseInPlace(this->obs.dof_pos, this->params.Get<float>("noise_dof_pos", 0.0f));
     this->obs.dof_vel = this->robot_state.motor_state.dq;
     // Sim-to-Real: 关节速度差分后放大的高频噪声，典型 a≈1.25 rad/s
     AddUniformNoiseInPlace(this->obs.dof_vel, this->params.Get<float>("noise_dof_vel", 0.0f));
 
+    //*************************************key_body_pos_relative**************************************** //
+
+    {
+        const int num_dofs = this->params.Get<int>("num_of_dofs");
+        this->obs.key_body_pos_rel.assign(num_dofs * 3, 0.0f);
+        const auto& joint_mapping = this->params.Get<std::vector<int>>("joint_mapping");
+        const bool mapping_ok = static_cast<int>(joint_mapping.size()) == num_dofs;
+        if (mapping_ok && this->mj_model && this->mj_data)
+        {
+            const float root_x = (this->obs.base_pos.size() >= 1) ? this->obs.base_pos[0] : 0.0f;
+            const float root_y = (this->obs.base_pos.size() >= 2) ? this->obs.base_pos[1] : 0.0f;
+            const float root_z = (this->obs.base_pos.size() >= 3) ? this->obs.base_pos[2] : 0.0f;
+            for (int i = 0; i < num_dofs; ++i)
+            {
+                const int actuator_id = joint_mapping[i];
+                if (actuator_id < 0 || actuator_id >= this->mj_model->nu) continue;
+                const int joint_id = this->mj_model->actuator_trnid[actuator_id * 2 + 0];
+                if (joint_id < 0 || joint_id >= this->mj_model->njnt) continue;
+                const int body_id = this->mj_model->jnt_bodyid[joint_id];
+                if (body_id < 0 || body_id >= this->mj_model->nbody) continue;
+
+                const int b = i * 3;
+                const float bx = static_cast<float>(this->mj_data->xpos[body_id * 3 + 0]);
+                const float by = static_cast<float>(this->mj_data->xpos[body_id * 3 + 1]);
+         
+                const float bz = static_cast<float>(this->mj_data->xpos[body_id * 3 + 2]);
+                this->obs.key_body_pos_rel[b + 0] = bx - root_x;
+                this->obs.key_body_pos_rel[b + 1] = by - root_y;
+                this->obs.key_body_pos_rel[b + 2] = bz - root_z;
+            }
+        }
+    }
+//************************************************************************************************************* //
 #ifdef RL_MUJOCO_TEST_CSV
-        // CSV: base 角速度(体轴 rad/s)、IMU 四元数 [w,x,y,z]、速度指令 [vx,vy,yaw_rate]
+        // CSV: base 角速度(体轴 rad/s)、IMU 四元数 [w,x,y,z]、重力投影、速度指令 [vx,vy,yaw_rate]
         if (!this->csv_initialized)
         {
             std::filesystem::create_directories("log/mujoco_test");
@@ -501,6 +887,7 @@ void RL_Sim::RunModel()
                 this->test_csv_file
                     << "ang_vel_x,ang_vel_y,ang_vel_z,"
                     << "base_quat_w,base_quat_x,base_quat_y,base_quat_z,"
+                    << "projected_gravity_x,projected_gravity_y,projected_gravity_z,"
                     << "cmd_x,cmd_y,cmd_yaw"
                     << std::endl;
             }
@@ -509,11 +896,14 @@ void RL_Sim::RunModel()
 
         if (this->test_csv_file.is_open())
         {
+            const std::vector<float> projected_gravity =
+                QuatRotateInverse(this->obs.base_quat, this->obs.gravity_vec);
             this->test_csv_file << std::fixed << std::setprecision(4);
             this->test_csv_file
                 << this->obs.ang_vel[0] << "," << this->obs.ang_vel[1] << "," << this->obs.ang_vel[2] << ","
                 << this->obs.base_quat[0] << "," << this->obs.base_quat[1] << ","
                 << this->obs.base_quat[2] << "," << this->obs.base_quat[3] << ","
+                << projected_gravity[0] << "," << projected_gravity[1] << "," << projected_gravity[2] << ","
                 << this->obs.commands[0] << "," << this->obs.commands[1] << "," << this->obs.commands[2]
                 << std::endl;
 
@@ -527,61 +917,77 @@ void RL_Sim::RunModel()
     // =================================================================
     // 🚨 裸观测数据探针 (Raw Observation Probe)
     // =================================================================
-    if (this->episode_length_buf % 50 == 0)
-    {
-        std::cout << "\n================ [ 裸观测数据检查 (Raw Obs) ] ================" << std::endl;
+    // if (this->episode_length_buf % 50 == 0)
+    // {
+    //     std::cout << "\n================ [ 裸观测数据检查 (Raw Obs) ] ================" << std::endl;
 
-            // 1. 角速度 (Angular Velocity)
-            // 期望：静止站立时应极小，接近 0
-            std::cout << "[1. 陀螺仪角速度] ang_vel (x, y, z) : "
-                      << this->obs.ang_vel[0] << ", "
-                      << this->obs.ang_vel[1] << ", "
-                      << this->obs.ang_vel[2] << std::endl;
+    //         // 1. 角速度 (Angular Velocity)
+    //         // 期望：静止站立时应极小，接近 0
+    //         std::cout << "[1. 陀螺仪角速度] ang_vel (x, y, z) : "
+    //                   << this->obs.ang_vel[0] << ", "
+    //                   << this->obs.ang_vel[1] << ", "
+    //                   << this->obs.ang_vel[2] << std::endl;
 
-            // 2. 指令 (Commands)
-            std::cout << "[2. 速度指令] commands (x, y, yaw) : "
-                      << this->obs.commands[0] << ", "
-                      << this->obs.commands[1] << ", "
-                      << this->obs.commands[2] << std::endl;
+    //         // 2. 指令 (Commands)
+    //         std::cout << "[2. 速度指令] commands (x, y, yaw) : "
+    //                   << this->obs.commands[0] << ", "
+    //                   << this->obs.commands[1] << ", "
+    //                   << this->obs.commands[2] << std::endl;
 
-            // 3. 姿态四元数 (Base Quaternion)
-            // 注意：你之前代码里存的是 [w, x, y, z]
-            std::cout << "[3. 机身四元数] base_quat (w,x,y,z) : "
-                      << this->obs.base_quat[0] << ", "
-                      << this->obs.base_quat[1] << ", "
-                      << this->obs.base_quat[2] << ", "
-                      << this->obs.base_quat[3] << std::endl;
+    //         // 3. 姿态四元数 (Base Quaternion)
+    //         // 注意：你之前代码里存的是 [w, x, y, z]
+    //         std::cout << "[3. 机身四元数] base_quat (w,x,y,z) : "
+    //                   << this->obs.base_quat[0] << ", "
+    //                   << this->obs.base_quat[1] << ", "
+    //                   << this->obs.base_quat[2] << ", "
+    //                   << this->obs.base_quat[3] << std::endl;
 
-            // 4. 重力投影 (Projected Gravity) —— 极其致命的一项！
-            // 我们直接调用你原有的计算逻辑，提前看看结果
-            std::vector<float> proj_gravity = QuatRotateInverse(this->obs.base_quat, this->obs.gravity_vec);
-            std::cout << "[4. 🚩重力投影] proj_gravity (x,y,z): "
-                      << proj_gravity[0] << ", "
-                      << proj_gravity[1] << ", "
-                      << proj_gravity[2] << std::endl;
+    //         // 4. 重力投影 (Projected Gravity) —— 极其致命的一项！
+    //         // 我们直接调用你原有的计算逻辑，提前看看结果
+    //         std::vector<float> proj_gravity = QuatRotateInverse(this->obs.base_quat, this->obs.gravity_vec);
+    //         std::cout << "[4. 🚩重力投影] proj_gravity (x,y,z): "
+    //                   << proj_gravity[0] << ", "
+    //                   << proj_gravity[1] << ", "
+    //                   << proj_gravity[2] << std::endl;
 
-            // 5. 关节位置 (DOF Position) 
-            // 挑前 4 个关节打印看看量级即可
-            std::cout << "[5. 关节绝对位置] dof_pos (前4个)   : ";
-            for (int i = 0; i < std::min(4, (int)this->obs.dof_pos.size()); ++i) {
-                std::cout << "Idx " << i << ":" << this->obs.dof_pos[i] << "  ";
-            }
-            std::cout << std::endl;
+    //         // 5. 关节位置 (DOF Position) 
+    //         // 挑前 4 个关节打印看看量级即可
+    //         std::cout << "[5. 关节绝对位置] dof_pos (前4个)   : ";
+    //         for (int i = 0; i < std::min(4, (int)this->obs.dof_pos.size()); ++i) {
+    //             std::cout << "Idx " << i << ":" << this->obs.dof_pos[i] << "  ";
+    //         }
+    //         std::cout << std::endl;
 
-            // 6. 关节速度 (DOF Velocity)
-            std::cout << "[6. 关节真实速度] dof_vel (前4个)   : ";
-            for (int i = 0; i < std::min(4, (int)this->obs.dof_vel.size()); ++i) {
-                std::cout << "Idx " << i << ":" << this->obs.dof_vel[i] << "  ";
-            }
-            std::cout << std::endl;
-        std::cout << "==============================================================\n" << std::endl;
-    }
+    //         // 6. 关节速度 (DOF Velocity)
+    //         std::cout << "[6. 关节真实速度] dof_vel (前4个)   : ";
+    //         for (int i = 0; i < std::min(4, (int)this->obs.dof_vel.size()); ++i) {
+    //             std::cout << "Idx " << i << ":" << this->obs.dof_vel[i] << "  ";
+    //         }
+    //         std::cout << std::endl;
+    //     std::cout << "==============================================================\n" << std::endl;
+    // }
     //rl控制
     this->obs.actions = this->Forward();
 
-    // Sim-to-Real: 维护 K 帧动作历史 (newest-first)
-    // 时机对齐 IsaacLab 默认 _apply_action 之前的 self.actions（即 clipped action），
-    // 下一次 ComputeObservation 中 obs.actions_history[0] 即为本步刚产出的 a_t（即 a_{t-1} from next-step's view）
+    if (this->config_name == "whole_body_tracking" && !this->last_policy_obs.empty())
+    {
+        const std::string amp_path = std::string(POLICY_DIR) + "/" + this->robot_name + "/" +
+                                     this->config_name + "/ampobs.csv";
+        // #region agent log
+        const std::vector<float> proj_grav = QuatRotateInverse(this->obs.base_quat, this->obs.gravity_vec);
+        LogObsVsAmpDebug(
+            static_cast<int>(this->episode_length_buf),
+            this->last_policy_obs,
+            this->obs.actions,
+            this->obs.dof_vel,
+            this->obs.base_quat,
+            proj_grav,
+            amp_path);
+        // #endregion
+    }
+
+    // Sim-to-Real: 内部按 newest-first 维护 K 帧 raw action 历史。
+    // ComputeObservation 会按 RobotLab / IsaacLab 的 oldest -> newest 顺序展开给 policy。
     {
         const int K = this->params.Get<int>("actions_history_length", 1);
         this->obs.actions_history.push_front(this->obs.actions);
@@ -592,6 +998,56 @@ void RL_Sim::RunModel()
     }
 
     this->ComputeOutput(this->obs.actions, this->output_dof_pos, this->output_dof_vel, this->output_dof_tau);
+
+    if (this->config_name == "whole_body_tracking" && !this->last_policy_obs.empty())
+    {
+        // H-1: progress aligned with obs term (step 1 -> progress 0).
+        float progress = 0.0f;
+        const int max_episode_length = this->params.Get<int>("max_episode_length", -1);
+        if (max_episode_length > 1 && this->episode_length_buf >= 1)
+        {
+            progress = static_cast<float>(this->episode_length_buf - 1) /
+                       static_cast<float>(max_episode_length - 1);
+        }
+        this->CSVLoggerPolicyObs(
+            static_cast<int>(this->episode_length_buf),
+            std::clamp(progress, 0.0f, 1.0f),
+            this->last_policy_obs,
+            this->obs.actions
+        );
+    }
+
+    if (this->config_name == "whole_body_tracking" && (this->episode_length_buf % 50 == 0))
+    {
+        float mean_abs_action = 0.0f;
+        for (float a : this->obs.actions) mean_abs_action += std::fabs(a);
+        if (!this->obs.actions.empty()) mean_abs_action /= static_cast<float>(this->obs.actions.size());
+
+        float mean_abs_q_delta = 0.0f;
+        const auto default_q = this->params.Get<std::vector<float>>("default_dof_pos");
+        const size_t n = std::min(this->output_dof_pos.size(), default_q.size());
+        for (size_t i = 0; i < n; ++i)
+        {
+            mean_abs_q_delta += std::fabs(this->output_dof_pos[i] - default_q[i]);
+        }
+        if (n > 0) mean_abs_q_delta /= static_cast<float>(n);
+
+        int obs_dim_total = 0;
+        for (int d : this->obs_dims) obs_dim_total += d;
+
+        std::cout << "\n" << LOGGER::INFO
+                  << "[DanceDebug] mean|action|=" << mean_abs_action
+                  << " mean|q_target-default|=" << mean_abs_q_delta
+                  << " obs_dim=" << obs_dim_total
+                  << std::endl;
+
+        std::cout << LOGGER::INFO << "[DanceDebug] action[0:6]=";
+        for (size_t i = 0; i < std::min<size_t>(6, this->obs.actions.size()); ++i)
+        {
+            std::cout << " " << this->obs.actions[i];
+        }
+        std::cout << std::endl;
+    }
 
     // ===== Sim-to-Real: Actuator Action Delay =====
     // 当 current_delay_ms_<=0（未启用）时退化为原有的直接 push 路径，保证行为向后兼容；
@@ -634,6 +1090,35 @@ std::vector<float> RL_Sim::Forward()
     }
 
     std::vector<float> clamped_obs = this->ComputeObservation();
+    this->last_policy_obs = clamped_obs;
+
+    const int expected_obs_dim = this->params.Get<int>("num_observations", -1);
+    if (expected_obs_dim > 0 && static_cast<int>(clamped_obs.size()) != expected_obs_dim)
+    {
+        std::cout << std::endl
+                  << LOGGER::WARNING
+                  << "[ObsDebug] observation dim mismatch: got="
+                  << clamped_obs.size() << ", expected=" << expected_obs_dim
+                  << ", config=" << this->config_name << std::endl;
+
+        std::cout << LOGGER::WARNING << "[ObsDebug] term dims:";
+        for (size_t i = 0; i < this->obs_dims.size(); ++i)
+        {
+            std::cout << " " << this->obs_dims[i];
+        }
+        std::cout << std::endl;
+
+        // Runtime guard: keep inference executable even if obs pipeline and policy export are not aligned.
+        // This is a temporary safety net for debugging; the long-term fix is to align training/export obs space.
+        if (static_cast<int>(clamped_obs.size()) > expected_obs_dim)
+        {
+            clamped_obs.resize(expected_obs_dim);
+        }
+        else
+        {
+            clamped_obs.insert(clamped_obs.end(), expected_obs_dim - static_cast<int>(clamped_obs.size()), 0.0f);
+        }
+    }
 
     std::vector<float> actions;
     if (this->params.Get<std::vector<int>>("observations_history").size() != 0)
@@ -647,7 +1132,10 @@ std::vector<float> RL_Sim::Forward()
         actions = this->model->forward({clamped_obs});
     }
 
-    if (!this->params.Get<std::vector<float>>("clip_actions_upper").empty() && !this->params.Get<std::vector<float>>("clip_actions_lower").empty())
+    const bool disable_action_clip = this->params.Get<bool>("disable_action_clip", false);
+    if (!disable_action_clip &&
+        !this->params.Get<std::vector<float>>("clip_actions_upper").empty() &&
+        !this->params.Get<std::vector<float>>("clip_actions_lower").empty())
     {
         return clamp(actions, this->params.Get<std::vector<float>>("clip_actions_lower"), this->params.Get<std::vector<float>>("clip_actions_upper"));
     }
@@ -706,6 +1194,8 @@ void RL_Sim::LogTick()
     }
 
     const std::vector<float>& cmd_q_live = this->robot_command.motor_command.q;
+    const std::vector<float> projected_gravity =
+        QuatRotateInverse(this->robot_state.imu.quaternion, std::vector<float>{0.0f, 0.0f, -1.0f});
 
     this->CSVLoggerTrace(
         t_sec,
@@ -713,9 +1203,11 @@ void RL_Sim::LogTick()
         commands,
         this->robot_state.imu.gyroscope,
         this->robot_state.imu.quaternion,
+        projected_gravity,
         this->robot_state.motor_state.q,
         cmd_q_live,
         this->robot_state.motor_state.dq,
+        this->output_dof_delta,
         this->obs.actions
     );
 }
