@@ -3,14 +3,16 @@
 
 myrobot/whole_body_tracking:
   model_name: "policy.pt"
-  num_observations: 89
-  observations: ["whole_body_tracking/joint_pos", "whole_body_tracking/joint_vel", "whole_body_tracking/root_pos_relative", "whole_body_tracking/ref_body_quat_tan_norm", "whole_body_tracking/key_body_pos_relative", "whole_body_tracking/progress"]
+  # 91 = 89 (AMP obs: 21+21+1+6+39+1) + 2 (policy-only base xy in env-local frame).
+  # AMP discriminator 仍只看 89 维, base_xy 是 policy 专属额外特征。
+  num_observations: 91
+  observations: ["whole_body_tracking/joint_pos", "whole_body_tracking/joint_vel", "whole_body_tracking/root_pos_relative", "whole_body_tracking/ref_body_quat_tan_norm", "whole_body_tracking/key_body_pos_relative", "whole_body_tracking/progress", "whole_body_tracking/root_xy_relative"]
   observations_history: []  # 0 is the latest observation
   observations_history_priority: "time"  # "time" or "term" priority
-  # Sim2sim alignment with Isaac training (myrobot_amp): 60Hz policy, 21.7s episode.
+  # Sim2sim alignment with Isaac training (myrobot_amp): 60Hz policy, 17.1s episode.
   policy_step_time: 0.0166666667  # 1/60 s
-  episode_duration_seconds: 21.7
-  max_episode_length: 1302  # round(21.7 * 60)
+  episode_duration_seconds: 17.1
+  max_episode_length: 1026  # round(17.1 * 60), 与 env.yaml episode_length_s 对齐
   # Phase A sim2sim: teleport MuJoCo to Isaac ampobs row on Dance Enter.
   # H-3 revisited: telemetry showed amp row 0 base orientation = +Y (not +X like
   # Mujoco default), so RSI-style spawn from ampobs row is required for progress=0.
@@ -20,20 +22,25 @@ myrobot/whole_body_tracking:
   # For ref_body_quat_tan_norm: quaternion_to_tangent_and_normal (no swap).
   root_rot_6d_swap_xy: false
   clip_obs: 100.0
-  clip_actions_lower: [-100.0, -100.0, -100.0,
-                       -100.0, -100.0, -100.0,
-                       -100.0, -100.0, -100.0,
-                       -100.0, -100.0, -100.0, 
-                       -100.0, -100.0, -100.0,
-                       -100.0, -100.0, -100.0, 
-                       -100.0, -100.0, -100.0]
-  clip_actions_upper: [100.0, 100.0, 100.0,
-                       100.0, 100.0, 100.0,
-                       100.0, 100.0, 100.0,
-                       100.0, 100.0, 100.0, 
-                       100.0, 100.0, 100.0,
-                       100.0, 100.0, 100.0, 
-                       100.0, 100.0, 100.0]
+  # 训练侧公式: delta = action_scale * clip(a_raw, -action_clip, +action_clip)
+  #          = 0.25         * clip(a_raw, -5,  +5)
+  # 部署侧 ComputeOutput 顺序是 scale->clip, 因此 clip 边界要换算到 q_target_delta 量纲:
+  #   bound = action_clip * action_scale = 5.0 * 0.25 = 1.25 rad
+  # 这样 clamp(0.25 * a_raw, -1.25, +1.25) 与训练 0.25 * clip(a_raw, -5, +5) 严格等价。
+  clip_actions_lower: [-1.25, -1.25, -1.25,
+                       -1.25, -1.25, -1.25,
+                       -1.25, -1.25, -1.25,
+                       -1.25, -1.25, -1.25,
+                       -1.25, -1.25, -1.25,
+                       -1.25, -1.25, -1.25,
+                       -1.25, -1.25, -1.25]
+  clip_actions_upper: [1.25, 1.25, 1.25,
+                       1.25, 1.25, 1.25,
+                       1.25, 1.25, 1.25,
+                       1.25, 1.25, 1.25,
+                       1.25, 1.25, 1.25,
+                       1.25, 1.25, 1.25,
+                       1.25, 1.25, 1.25]
   # PD gains aligned with policy/myrobot/params/env.yaml ImplicitActuator stiffness/damping.
   rl_kp: [8, 8, 24, 8, 8, 24, 8, 
           8, 5, 8, 8, 8, 8, 24, 
@@ -51,38 +58,29 @@ myrobot/whole_body_tracking:
         1.48, 0.5, 0.5, 0.12, 0.12, 0.123, 0.123]
   num_of_dofs: 21
   root_z_ref: 0.25
-  #mujoco
-  action_scale: [0.000, 0.000,  #0~1      hip pitch
-                 1.000,        #2        waist pitch
-                 0.000, 0.000,  #3~4      hip roll
-                 1.000,        #5        waist_yaw
-                 1.000, 1.000,  #6~7      hip yaw
-                 0.0,         #8        head                     
-                 1.000, 1.000,  #9~10     shoulder pitch
-                 1.000, 1.000,  #11~12    knee
-                 1.000, 1.000,  #13~14    shoulder roll
-                 0.000, 0.000,  #10~16    ankle pitch
-                 1.000, 1.000,  #17~18    elbow
-                 0.000, 0.000]  #19~7.79    ankle roll
-  #real
-  # action_scale: [0.100000, 0.100000,  #0~1      hip pitch
-  #           0.100000,        #2        waist pitch
-  #           0.100000, 0.100000,  #3~4      hip roll
-  #           0.100000,        #5        waist_yaw
-  #           0.100000, 0.100000,  #6~7      hip yaw
-  #           0.0,         #8        head                     
-  #           0.100000, 0.100000,  #9~10     shoulder pitch
-  #           0.100000, 0.100000,  #11~12    knee
-  #           0.100000, 0.100000,  #13~14    shoulder roll
-  #           0.100000, 0.100000,  #10~16    ankle pitch
-  #           0.100000, 0.100000,  #17~18    elbow
-  #           0.100000, 0.100000]  #19~7.79    ankle roll
-  action_type: "absolute_position"
-  # Sim2sim alignment for dance policy:
-  # q_target = offset + (q_max_soft - q_min_soft) * action
-  # offset = (q_max_soft + q_min_soft) / 2
-  use_soft_joint_pos_action: true
-  soft_limit_apply_action_scale: true
+  # Delta (relative) joint-position control, aligned with robot_lab `_apply_action`:
+  #   delta      = action_scale * clip(action, -action_clip, +action_clip)
+  #   q_target   = q_current + delta                       (q_current = 实测关节角)
+  #   q_target   = clip(q_target, q_target_lower, q_target_upper)
+  # 训练侧 action_scale 是单一标量 0.25 (所有 21 个关节相同), 这里展开成数组方便
+  # 单独 ablation; 默认应整体保持 0.25。
+  action_scale: [0.25, 0.25,    #0~1      hip pitch
+                 0.25,          #2        waist pitch
+                 0.25, 0.25,    #3~4      hip roll
+                 0.25,          #5        waist_yaw
+                 0.25, 0.25,    #6~7      hip yaw
+                 0.25,          #8        head
+                 0.25, 0.25,    #9~10     shoulder pitch
+                 0.25, 0.25,    #11~12    knee
+                 0.25, 0.25,    #13~14    shoulder roll
+                 0.25, 0.25,    #15~16    ankle pitch
+                 0.25, 0.25,    #17~18    elbow
+                 0.25, 0.25]    #19~20    ankle roll
+  # delta action, q_target = q_current + delta, 走 ComputeOutput 的 relative_position 分支。
+  action_type: "relative_position"
+  # 旧 absolute-position-from-soft-limits 路径关闭 (delta 路径不需要 offset/scale 映射)。
+  use_soft_joint_pos_action: false
+  soft_limit_apply_action_scale: false
   # Ablation: disable deployment-only target modifiers (training has none).
   rl_blend_duration: 0.0
   # Dance startup smooth handover: blend from entry pose to policy target for
@@ -91,10 +89,17 @@ myrobot/whole_body_tracking:
   enable_action_ramp: false
   action_ramp_duration: 0.0
   enable_q_target_clamp: true
+  # Delta 模式下 q_target 范围必须覆盖 motion 真实关节角范围, 否则膝关节蹲下时被夹死。
+  # 训练侧最终也会 clamp 到 dof hard limit (USD 的 joint range), 这里用 soft_joint_pos_max
+  # 等价物 (knee 1.7, 其它与原 absolute 模式上下界一致), 兼顾物理安全和 motion 覆盖。
   q_target_lower: [-1.365, -1.365, -0.72, -0.45, -0.45, -0.72, -0.54, -0.54, 0.0, -0.72, -0.72, -0.1, -0.1, -0.72, -0.72, -0.72, -0.72, -0.72, -0.72, -0.36, -0.36]
   q_target_upper: [1.065, 1.065, 0.72, 0.45, 0.45, 0.72, 0.54, 0.54, 0.0, 0.72, 0.72, 1.7, 1.7, 0.72, 0.72, 0.72, 0.72, 0.72, 0.72, 0.36, 0.36]
+  # Delta 模式 + 60Hz policy + 训练 action_clip=5/scale=0.25 -> 单步最大 delta = 1.25 rad,
+  # 对应 75 rad/s 的等效 q_target 速度, 实物 actuator 跟不上必然过冲。建议开 rate limit 兜底:
+  # 把单步 q_target 步长限制到 ~14 deg = 0.25 rad (跟训练 action_scale 同量级, 不过分扼杀策略)。
+  # 默认先关掉, 真机部署如果再看到瞬间过冲再打开 (true).
   enable_q_target_rate_limit: false
-  q_target_max_step_scalar: 1.0
+  q_target_max_step_scalar: 0.25
   soft_joint_pos_min: [-1.365, -1.365, -0.72, -0.45, -0.45, -0.72, -0.54, -0.54, 0.0, -0.72, -0.72, -0.1, -0.1, -0.72, -0.72, -0.72, -0.72, -0.72, -0.72, -0.36, -0.36]
   soft_joint_pos_max: [1.065, 1.065, 0.72, 0.45, 0.45, 0.72, 0.54, 0.54, 0.0, 0.72, 0.72, 1.7, 1.7, 0.72, 0.72, 0.72, 0.72, 0.72, 0.72, 0.36, 0.36]
   action_deadzone_lower: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
@@ -114,14 +119,19 @@ myrobot/whole_body_tracking:
                 2.942, 2.942,
                 0.441, 0.441,
                 2.942, 2.942]
-#   default_dof_pos: [-0.3, -0.3,0.0, 0.05, -0.05, 0.0, 0.004, -0.004, 
-#                     0.0, 0.0, 0.0,
-#                     0.5, 0.5, 0.0, 0.0, 
-#                     -0.2, -0.2, 0.0, 0.0, -0.06, 0.06]
-  default_dof_pos: [-0.0, -0.0,0.0, 0.00, -0.00, 0.0, 0.00, -0.00, 
+  default_dof_pos: [-0.3, -0.3,0.0, 0.05, -0.05, 0.0, 0.004, -0.004, 
                     0.0, 0.0, 0.0,
-                    0.0, 0.0, 0.0, 0.0, 
-                    -0.0, -0.0, 0.0, 0.0, -0.00, 0.0]
+                    0.5, 0.5, 0.0, 0.0, 
+                    -0.2, -0.2, 0.0, 0.0, -0.06, 0.06]
+  # default_dof_pos: [0.1507440358, 0.0461158566, 0.1927706748,   # hip pitch L/R, waist pitch
+  #                   0.1219201833, -0.2156091630, -0.0125178732, # hip roll L/R, waist yaw
+  #                   0.2559662759, -0.1999443918, 0.0,           # hip yaw L/R, head
+  #                   -0.1231449172, -0.0586300083,               # shoulder pitch L/R
+  #                   0.0819103271, 0.2212441415,                # knee L/R
+  #                   0.2297214270, -0.2410776317,               # shoulder roll L/R
+  #                   -0.1140388697, -0.1012539119,              # ankle pitch L/R
+  #                   0.0464353338, -0.0598327368,                # elbow L/R
+  #                   -0.0077413879, 0.1457020193]               # ankle roll L/R
   joint_mapping: [0, 6, 13, 1, 7, 12, 2, 8, 20, 14, 17, 3, 9, 15, 18, 4, 10, 16, 19, 5, 11]
   # key body order:
   # left_shoulder_pitch, right_shoulder_pitch, left_shoulder_roll, right_shoulder_roll,

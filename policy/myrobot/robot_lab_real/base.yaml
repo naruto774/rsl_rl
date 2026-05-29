@@ -35,19 +35,50 @@ myrobot/robot_lab_real:
   # 17: left_elbow          18: right_elbow
   # 19: left_ankle_roll     20: right_ankle_roll
 
-  # default_dof_pos: [-0.3, -0.3, 0.0,           # hip pitch L/R, waist pitch
-  #                   0.05, -0.05, 0.0,          # hip roll L/R, waist yaw
-  #                   0.004, -0.004, 0.0,        # hip yaw L/R, head
-  #                   0.0, 0.0,                  # shoulder pitch L/R
-  #                   0.5, 0.5,                  # knee L/R
-  #                   0.0, 0.0,                  # shoulder roll L/R
-  #                   -0.2, -0.2,                # ankle pitch L/R
-  #                   0.0, 0.0,                  # elbow L/R
-  #                   -0.06, 0.06]               # ankle roll L/R
-  default_dof_pos: [-0.0, -0.0,0.0, 0.00, -0.00, 0.0, 0.00, -0.00, 
-                    0.0, 0.0, 0.0,
-                    0.0, 0.0, 0.0, 0.0, 
-                    -0.0, -0.0, 0.0, 0.0, -0.00, 0.0]
+  default_dof_pos: [-0.3, -0.3, 0.0,           # hip pitch L/R, waist pitch
+                    0.05, -0.05, 0.0,          # hip roll L/R, waist yaw
+                    0.004, -0.004, 0.0,        # hip yaw L/R, head
+                    0.0, 0.0,                  # shoulder pitch L/R
+                    0.5, 0.5,                  # knee L/R
+                    0.0, 0.0,                  # shoulder roll L/R
+                    -0.2, -0.2,                # ankle pitch L/R
+                    0.0, 0.0,                  # elbow L/R
+                    -0.06, 0.06]               # ankle roll L/R
+#   default_dof_pos: [0.1507440358, 0.0461158566, 0.1927706748,   # hip pitch L/R, waist pitch
+#                     0.1219201833, -0.2156091630, -0.0125178732, # hip roll L/R, waist yaw
+#                     0.2559662759, -0.1999443918, 0.0,           # hip yaw L/R, head
+#                     -0.1231449172, -0.0586300083,               # shoulder pitch L/R
+#                     0.0819103271, 0.2212441415,                # knee L/R
+#                     0.2297214270, -0.2410776317,               # shoulder roll L/R
+#                     -0.1140388697, -0.1012539119,              # ankle pitch L/R
+#                     0.0464353338, -0.0598327368,                # elbow L/R
+#                     -0.0077413879, 0.1457020193]               # ankle roll L/R
+
+                            #     "waist_pitch": 0.0407,
+        #     "waist_yaw": 0.0594,
+        #     "head_joint": 0.0,
+        #     # right leg
+        #     "right_hip_pitch": 0.0179,
+        #     "right_hip_roll": 0.0407,
+        #     "right_hip_yaw": 0.0451,
+        #     "right_knee": 0.1310,
+        #     "right_ankle_pitch": -0.1310,
+        #     "right_ankle_roll": 0.0566,
+        #     # left leg
+        #     "left_hip_pitch": 0.0746,
+        #     "left_hip_roll": 0.0466,
+        #     "left_hip_yaw": -0.0137,
+        #     "left_knee": 0.0782,
+        #     "left_ankle_pitch": -0.0816,
+        #     "left_ankle_roll": 0.0603,
+        #     # right arm
+        #     "right_shoulder_pitch": -0.2210,
+        #     "right_shoulder_roll": 0.0809,
+        #     "right_elbow": 0.2670,
+        #     # left arm
+        #     "left_shoulder_pitch": -0.1230,
+        #     "left_shoulder_roll": 0.0353,
+        #     "left_elbow": -0.1910,
   joint_names: [left_hip_pitch, right_hip_pitch, waist_pitch,
                 left_hip_roll, right_hip_roll, waist_yaw,
                 left_hip_yaw, right_hip_yaw, head,

@@ -2,8 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 myrobot:
-  dt: 0.005
-  decimation: 4
+  # 物理 240Hz, policy 60Hz 严格对齐：dt * decimation = 1/60 s = policy_step_time。
+  # 之前 dt=0.005, decimation=4 → dt*decimation=20ms (50Hz)，而 config 里 policy 是 60Hz，
+  # 每个 policy step 内 PD 命令更新 16.67/5=3.33 次（非整数）→ q_target 跳变时产生
+  # 相位漂移 + 瞬态振铃，是全身抖动的根因之一。
+  # 改成 dt=1/240, decimation=4 → 每 policy step 内 PD 严格 4 整数次，对齐训练时
+  # IsaacLab ImplicitActuator 的 "policy step 内 PD 一次性收敛" 等效行为。
+  dt: 0.004166666666666667   # 1/240 s, physics @ 240Hz (原 200Hz, +20%)
+  decimation: 4              # policy_step = dt * decimation = 1/60 s ≡ policy_step_time
   fixed_kp: [8, 8, 24, 8, 8, 24, 8, 
              8, 8, 8, 8, 8, 8, 24, 
              24, 6, 6, 5, 5, 6, 6]
@@ -20,16 +26,21 @@ myrobot:
                   1.96, 2.94, 1.96, 
                   1.96, 2.94, 1.96,
                   1.96]
-  # default_dof_pos: [-0.3, 0.05, 0.004, 0.5, -0.2, -0.06,  #left
-  #                   -0.3, -0.05, -0.004, 0.5, -0.2, 0.06,  #right
-  #                   0.0, 0.0, 
-  #                   0.0, 0.0, 0.0,
-  #                   0.0, 0.0, 0.0,
-  #                   0.0]
-  default_dof_pos: [-0.0, -0.0,0.0, 0.00, -0.00, 0.0, 0.00, -0.00, 
+  default_dof_pos: [-0.3, 0.05, 0.004, 0.5, -0.2, -0.06,  #left
+                    -0.3, -0.05, -0.004, 0.5, -0.2, 0.06,  #right
+                    0.0, 0.0, 
                     0.0, 0.0, 0.0,
-                    0.0, 0.0, 0.0, 0.0, 
-                    -0.0, -0.0, 0.0, 0.0, -0.00, 0.0]
+                    0.0, 0.0, 0.0,
+                    0.0]
+#   default_dof_pos: [0.1507440358, 0.0461158566, 0.1927706748,   # hip pitch L/R, waist pitch
+#                     0.1219201833, -0.2156091630, -0.0125178732, # hip roll L/R, waist yaw
+#                     0.2559662759, -0.1999443918, 0.0,           # hip yaw L/R, head
+#                     -0.1231449172, -0.0586300083,               # shoulder pitch L/R
+#                     0.0819103271, 0.2212441415,                # knee L/R
+#                     0.2297214270, -0.2410776317,               # shoulder roll L/R
+#                     -0.1140388697, -0.1012539119,              # ankle pitch L/R
+#                     0.0464353338, -0.0598327368,                # elbow L/R
+#                     -0.0077413879, 0.1457020193]               # ankle roll L/R
   joint_names: [right_hip_pitch, right_hip_roll, right_hip_yaw, right_knee, right_ankle_pitch, right_ankle_roll,
                 left_hip_pitch, left_hip_roll, left_hip_yaw, left_knee, left_ankle_pitch, left_ankle_roll,
                 waist_pitch,waist_yaw, 

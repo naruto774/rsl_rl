@@ -75,9 +75,9 @@ def parse_args() -> argparse.Namespace:
 
 def build_cmd(t: float) -> np.ndarray:
     q_cmd = np.zeros(CMD_DIM, dtype=np.float64)
-    q_cmd[10] = 0.02 + 0.005 * np.cos(6.0 * t) - 0.004 * np.sin(6.0 * t)
-    q_cmd[14] = 0.04 - 0.0095 * np.cos(6.0 * t) + 0.005 * np.sin(6.0 * t)
-    q_cmd[18] = 0.44 - 0.037 * np.cos(6.0 * t) + 0.013 * np.sin(6.0 * t)
+    # q_cmd[10] = 0.02 + 0.005 * np.cos(6.0 * t) - 0.004 * np.sin(6.0 * t)
+    # q_cmd[13] = 0.04 - 0.0095 * np.cos(6.0 * t) + 0.005 * np.sin(6.0 * t)
+    q_cmd[14] = 0.44 - 0.037 * np.cos(6.0 * t) + 0.013 * np.sin(6.0 * t)
     return q_cmd
 
 

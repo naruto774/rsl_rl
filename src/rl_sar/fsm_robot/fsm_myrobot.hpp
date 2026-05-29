@@ -407,8 +407,8 @@ public:
 
         RLControl();
 
-        // Keep dance state after finishing playback.
-        // Users can still switch state manually via keyboard/gamepad in CheckChange().
+        // Auto-exit on playback completion is handled in CheckChange() below.
+        // Manual keyboard/gamepad transitions still take precedence.
     }
 
     void Exit() override
@@ -416,6 +416,21 @@ public:
         rl.rl_init_done = false;
     }
 
+    // -----------------------------------------------------------------------
+    // CheckChange policy:
+    //   1) Manual transitions (P / B / A / DPad) keep highest priority so that
+    //      the operator can always interrupt the dance.
+    //   2) If no manual input arrives and the episode buffer reaches
+    //      max_episode_length (i.e. policy has played the full motion length
+    //      it was trained on), auto-exit to GetDown.
+    //      Rationale: keeping the FSM in Dance after the trained horizon
+    //      pushes `progress` obs to a clamp(1.0) value that lies outside the
+    //      training distribution. On hardware this OOD input drives the
+    //      policy to emit saturating commands (sh_roll_L jumping ±soft_limit
+    //      every frame). GetDown then performs a 2s interpolation back to
+    //      start_state.motor_state.q and auto-switches to Passive, so the
+    //      handover is mechanically smooth.
+    // -----------------------------------------------------------------------
     std::string CheckChange() override
     {
         if (rl.control.current_keyboard == Input::Keyboard::P || rl.control.current_gamepad == Input::Gamepad::LB_X)
@@ -439,6 +454,17 @@ public:
                  rl.control.current_gamepad == Input::Gamepad::RB_DPadDown)
         {
             return "RLFSMStateRLWholeBodyTrackingDance";
+        }
+
+        const int max_episode_length = rl.params.Get<int>("max_episode_length", -1);
+        if (max_episode_length > 1 &&
+            static_cast<long long>(rl.episode_length_buf) >= static_cast<long long>(max_episode_length))
+        {
+            std::cout << "\n" << LOGGER::INFO
+                      << "[Dance] episode completed (ep_step=" << rl.episode_length_buf
+                      << ", max=" << max_episode_length << "), auto-exiting to GetDown."
+                      << std::endl;
+            return "RLFSMStateGetDown";
         }
         return state_name_;
     }

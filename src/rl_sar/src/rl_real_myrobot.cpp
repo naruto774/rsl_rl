@@ -10,8 +10,11 @@
  */
 
 #include "rl_real_myrobot.hpp"
+#include <array>
 #include <chrono>
 #include <ctime>
+#include <iomanip>
+#include <sstream>
 #include <yaml-cpp/yaml.h>
 
 static float WrapToPi(float angle)
@@ -237,6 +240,60 @@ bool RL_Real::ReceiveState()
     }
 
     state_received.store(true);
+
+    // ------------------------------------------------------------------------
+    // [上半身 obs 字段诊断打印] — 节流到 ~1Hz
+    //
+    // 排查链路（rl_sar/dance）：
+    //   电机端编码器 → CAN → Pi motor_reader → ZMQ "low_state" 包 flat[0:42]
+    //                                            ↑↑↑  这里就是当前位置
+    //   → PC SUB → state_q/state_qd → robot_state.motor_state.q/dq
+    //   → obs.dof_pos/dof_vel → policy.forward(obs)
+    //
+    // PC 端 (上面循环 flat[i] → state_q[i]) 是无脑全量复制，21 路都填，必然 OK。
+    // 因此若打印值有以下任一异常 → 故障点铁定在 Pi 端及更上游：
+    //
+    //   1) 上半身 q 长期为 ~0 且与下半身/IMU 抖动幅度不匹配
+    //      → Pi motor_reader 没读到这几路电机
+    //        (motor_ids 配置缺失 / CAN bus 未 attach / 电机扭矩使能未开)
+    //   2) 上半身 q 完全不变但下半身实时跟随
+    //      → 上半身电机在线但反馈被 freeze（电机进入掉电/待机模式）
+    //   3) dq 始终为 0 而 q 在变
+    //      → Pi 端只填了位置、速度估计未做 (差分窗口失效)
+    //
+    // 仅用于诊断，对策略行为无影响。
+    // 上半身关节（IsaacSim 训练顺序，与 obs.dof_pos 完全对齐）：
+    //   2=waist_pitch  5=waist_yaw  8=head
+    //   9=sh_pitch_R 10=sh_pitch_L 13=sh_roll_R 14=sh_roll_L
+    //  17=elbow_R   18=elbow_L
+    // ------------------------------------------------------------------------
+    {
+        static const std::array<int, 9> upper_idx = {2, 5, 8, 9, 10, 13, 14, 17, 18};
+        static const char* upper_name[9] = {
+            "waP", "waY", "hd", "spR", "spL", "srR", "srL", "elR", "elL"
+        };
+        static auto last_dbg_t = std::chrono::steady_clock::now();
+        auto now_t = std::chrono::steady_clock::now();
+        if (std::chrono::duration<float>(now_t - last_dbg_t).count() >= 1.0f)
+        {
+            last_dbg_t = now_t;
+
+            std::ostringstream oss;
+            oss << std::fixed << std::setprecision(3);
+            oss << "[UpperObs] q:";
+            for (int k = 0; k < 9; ++k)
+            {
+                oss << " " << upper_name[k] << "=" << state_q[upper_idx[k]];
+            }
+            oss << std::setprecision(2) << " | dq:";
+            for (int k = 0; k < 9; ++k)
+            {
+                oss << " " << upper_name[k] << "=" << state_qd[upper_idx[k]];
+            }
+            std::cout << oss.str() << std::endl;
+        }
+    }
+
     zmq_msg_close(&msg);
     return true;
 }
@@ -449,27 +506,57 @@ void RL_Real::OnPolicyConfigLoaded()
         // 2) 加载离线静态参考（兜底，FK 不可用时用）；同时也提供 root_z_ref（实机无 base_pos 估计）
         this->dance_static_ref_loaded = this->LoadDanceStaticRef();
 
+        // 真机操作安全提示。每次切到 dance 都打印一遍当前策略 / obs 完整度,
+        // 让操作员上手前心里有数 (action 物理含义 / 哪些 obs 是 OOD)。
+        const std::string action_type =
+            this->params.Get<std::string>("action_type", "default_position");
+        const float action_scale_first =
+            this->params.Get<std::vector<float>>("action_scale", {0.25f}).front();
+        const float action_clip_first =
+            this->params.Get<std::vector<float>>("clip_actions_upper", {1.25f}).front();
+        const int dance_obs_dim =
+            this->params.Get<int>("num_observations", 91);
+
         std::cout << "\n" << LOGGER::WARNING
                   << "============================================================" << std::endl;
         std::cout << LOGGER::WARNING
                   << "[SafetyCheck] Entering DANCE (whole_body_tracking)." << std::endl;
         std::cout << LOGGER::WARNING
-                  << "  - Policy uses absolute_position + soft joint pos action," << std::endl;
-        std::cout << LOGGER::WARNING
-                  << "    targets can swing across the full soft joint range." << std::endl;
+                  << "  - Policy obs dim: " << dance_obs_dim
+                  << " (89 AMP obs + 2 policy-only base_xy)." << std::endl;
+        if (action_type == "relative_position")
+        {
+            std::cout << LOGGER::WARNING
+                      << "  - Action: DELTA (relative_position). per-step q_target =" << std::endl;
+            std::cout << LOGGER::WARNING
+                      << "    q_current + " << action_scale_first
+                      << " * clip(a, +/- " << (action_clip_first / std::max(action_scale_first, 1e-6f))
+                      << "), max |delta| <= " << action_clip_first << " rad." << std::endl;
+            std::cout << LOGGER::WARNING
+                      << "    Then q_target is clamped to [q_target_lower, q_target_upper]." << std::endl;
+        }
+        else
+        {
+            std::cout << LOGGER::WARNING
+                      << "  - Action: ABSOLUTE (legacy soft-joint-pos-action), q_target" << std::endl;
+            std::cout << LOGGER::WARNING
+                      << "    can swing across the full soft joint range. NOT aligned with" << std::endl;
+            std::cout << LOGGER::WARNING
+                      << "    current training side, you probably want action_type=relative_position." << std::endl;
+        }
         if (this->dance_online_fk_enabled)
         {
             std::cout << LOGGER::WARNING
-                      << "  - key_body_pos_rel: ONLINE FK (mj_kinematics on MJCF, tracks" << std::endl;
+                      << "  - key_body_pos_rel (39d): ONLINE FK (mj_kinematics on MJCF, tracks" << std::endl;
             std::cout << LOGGER::WARNING
-                      << "    real-time joint angles + IMU quat). Self-consistent with" << std::endl;
+                      << "    real-time joint angles + IMU quat). Self-consistent with training;" << std::endl;
             std::cout << LOGGER::WARNING
-                      << "    training; residual OOD only on base_pos.z (no z-estimator)." << std::endl;
+                      << "    residual OOD only on base_pos.z (no z-estimator)." << std::endl;
         }
         else if (this->dance_static_ref_loaded)
         {
             std::cout << LOGGER::WARNING
-                      << "  - key_body_pos_rel: STATIC reference from offline FK" << std::endl;
+                      << "  - key_body_pos_rel (39d): STATIC reference from offline FK" << std::endl;
             std::cout << LOGGER::WARNING
                       << "    (default_pose_static_ref.yaml). Posture-locked, doesn't" << std::endl;
             std::cout << LOGGER::WARNING
@@ -478,10 +565,18 @@ void RL_Real::OnPolicyConfigLoaded()
         else
         {
             std::cout << LOGGER::WARNING
-                      << "  - key_body_pos_rel: ZERO-FILLED (FK + static ref both missing)" << std::endl;
+                      << "  - key_body_pos_rel (39d): ZERO-FILLED (FK + static ref both missing)" << std::endl;
             std::cout << LOGGER::WARNING
                       << "    -> policy operates strongly OOD on these ~40 dims." << std::endl;
         }
+        std::cout << LOGGER::WARNING
+                  << "  - base_xy (2d): forced to (0, 0) on real robot (no odometry)." << std::endl;
+        std::cout << LOGGER::WARNING
+                  << "    Lies inside training U(-obs_noise_base_xy, +obs_noise_base_xy)," << std::endl;
+        std::cout << LOGGER::WARNING
+                  << "    so first half of episode is in-distribution; long-horizon CoM" << std::endl;
+        std::cout << LOGGER::WARNING
+                  << "    drift cannot be inferred -> mild late-episode OOD." << std::endl;
         std::cout << LOGGER::WARNING
                   << "  - Make sure: gantry attached / e-stop in hand / clear area." << std::endl;
         std::cout << LOGGER::WARNING

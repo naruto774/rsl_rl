@@ -281,6 +281,27 @@ std::vector<float> RL::ComputeObservation()
             progress = std::clamp(progress, 0.0f, 1.0f);
             obs_list.push_back({progress});
         }
+        else if (observation == "whole_body_tracking/root_xy_relative")
+        {
+            // Policy-only extra: base (x, y) in env-local frame (no yaw rotation).
+            // 训练侧公式: root_xy_local = body_pos_w[ref_body, 0:2] - env_origin[0:2]
+            //   - IsaacLab RSI 后 base 被放置在 env_origin 附近, motion 标准化使 torso_xy ≈ 0,
+            //     所以 obs_xy 实际是 "spawn 起累积位移", 典型量级 ±0.1 m。
+            //   - 训练时还会叠加 U(-obs_noise_base_xy, +obs_noise_base_xy) 噪声 (默认 0.02 m)。
+            // 部署侧:
+            //   - MuJoCo backend 把 qpos[0:2] (world 系) 写入 base_pos[0:2], scene 默认
+            //     env_origin = 0, 所以直接读 base_pos[0:2] 就等价于训练 obs。
+            //   - 真机 backend 没有 odometry, base_pos[0:2] = 0 -> obs_xy = (0, 0),
+            //     落在训练分布中心 (噪声 N(0, 0.02^2)), 长 episode 后期累积偏移信息丢失,
+            //     这部分 OOD 不可避免, 但短 episode/重心切换类动作影响很小。
+            float bx = 0.0f, by = 0.0f;
+            if (this->obs.base_pos.size() >= 2)
+            {
+                bx = this->obs.base_pos[0];
+                by = this->obs.base_pos[1];
+            }
+            obs_list.push_back({bx, by});
+        }
         else if (observation == "whole_body_tracking/motion_command")
         {
             std::vector<float> motion_cmd;
