@@ -64,6 +64,27 @@ def normalize_quat_wxyz(q: np.ndarray) -> np.ndarray:
     return q / n
 
 
+def align_quat_sign_to_anchor(q: np.ndarray, anchor: np.ndarray) -> np.ndarray:
+    # q and -q represent the same rotation; enforce sign continuity against anchor.
+    if float(np.dot(q, anchor)) < 0.0:
+        return -q
+    return q
+
+
+def average_quats_wxyz_sign_aligned(quats: list[np.ndarray]) -> np.ndarray:
+    if not quats:
+        raise ValueError("quats must be non-empty")
+    aligned: list[np.ndarray] = []
+    anchor = normalize_quat_wxyz(quats[0])
+    aligned.append(anchor)
+    for q in quats[1:]:
+        qn = normalize_quat_wxyz(q)
+        qn = align_quat_sign_to_anchor(qn, anchor)
+        aligned.append(qn)
+    q_avg = np.mean(np.stack(aligned, axis=0), axis=0)
+    return normalize_quat_wxyz(q_avg)
+
+
 def yaw_deg_from_quat_wxyz(q: np.ndarray) -> float:
     # ZYX yaw from quaternion (w, x, y, z)
     w, x, y, z = q
@@ -145,8 +166,9 @@ def load_ref_quat_from_sim_trace(trace_path: str, state_name: str, skip: int, wi
         i0 = 0
         i1 = min(len(quats), max(1, int(window)))
 
-    q_avg = np.mean(np.stack(quats[i0:i1], axis=0), axis=0)
-    return normalize_quat_wxyz(q_avg)
+    # Handle quaternion double-cover explicitly (q and -q are same rotation).
+    # Without sign alignment, direct averaging can cancel into near-zero vectors.
+    return average_quats_wxyz_sign_aligned(quats[i0:i1])
 
 
 def main() -> None:
@@ -190,6 +212,7 @@ def main() -> None:
     best_sample = -1
     best_yaw = 0.0
     best_quat = ref_quat.copy()
+    prev_quat: Optional[np.ndarray] = None
 
     try:
         while True:
@@ -207,6 +230,9 @@ def main() -> None:
             ts = float(np.frombuffer(payload, dtype="<f8", count=1, offset=0)[0])
             flat = np.frombuffer(payload, dtype="<f8", count=FLAT_COUNT, offset=TS_BYTES)
             quat = normalize_quat_wxyz(flat[45:49].astype(np.float64, copy=False))
+            if prev_quat is not None:
+                quat = align_quat_sign_to_anchor(quat, prev_quat)
+            prev_quat = quat
             yaw_deg = yaw_deg_from_quat_wxyz(quat)
             yaw_err_deg = wrap_deg_180(yaw_deg - ref_yaw)
             angle_err_deg = quat_angle_diff_deg(ref_quat, quat)

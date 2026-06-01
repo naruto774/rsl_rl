@@ -515,7 +515,7 @@ void RL_Real::OnPolicyConfigLoaded()
         const float action_clip_first =
             this->params.Get<std::vector<float>>("clip_actions_upper", {1.25f}).front();
         const int dance_obs_dim =
-            this->params.Get<int>("num_observations", 91);
+            this->params.Get<int>("num_observations", 89);
 
         std::cout << "\n" << LOGGER::WARNING
                   << "============================================================" << std::endl;
@@ -523,7 +523,7 @@ void RL_Real::OnPolicyConfigLoaded()
                   << "[SafetyCheck] Entering DANCE (whole_body_tracking)." << std::endl;
         std::cout << LOGGER::WARNING
                   << "  - Policy obs dim: " << dance_obs_dim
-                  << " (89 AMP obs + 2 policy-only base_xy)." << std::endl;
+                  << " (89d: joint_pos + joint_vel + root_z + root_rot_6d + key_body_pos_rel + progress)." << std::endl;
         if (action_type == "relative_position")
         {
             std::cout << LOGGER::WARNING
@@ -569,14 +569,6 @@ void RL_Real::OnPolicyConfigLoaded()
             std::cout << LOGGER::WARNING
                       << "    -> policy operates strongly OOD on these ~40 dims." << std::endl;
         }
-        std::cout << LOGGER::WARNING
-                  << "  - base_xy (2d): forced to (0, 0) on real robot (no odometry)." << std::endl;
-        std::cout << LOGGER::WARNING
-                  << "    Lies inside training U(-obs_noise_base_xy, +obs_noise_base_xy)," << std::endl;
-        std::cout << LOGGER::WARNING
-                  << "    so first half of episode is in-distribution; long-horizon CoM" << std::endl;
-        std::cout << LOGGER::WARNING
-                  << "    drift cannot be inferred -> mild late-episode OOD." << std::endl;
         std::cout << LOGGER::WARNING
                   << "  - Make sure: gantry attached / e-stop in hand / clear area." << std::endl;
         std::cout << LOGGER::WARNING
@@ -671,6 +663,7 @@ void RL_Real::RunModel()
         const float root_z = this->dance_static_ref_loaded
                              ? this->dance_root_z_ref
                              : this->params.Get<float>("root_z_ref", 0.23f);
+        // base_xy 不再作为 whole_body_tracking 的 policy 输入，仅保留 root_z。
         this->obs.base_pos = {0.0f, 0.0f, root_z};
 
         // key_body_pos_rel: 优先在线 FK

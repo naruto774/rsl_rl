@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cmath>
 #include <iomanip>
+#include <algorithm>
 
 #ifdef RL_MUJOCO_TEST_CSV
 #include <chrono>
@@ -53,6 +54,18 @@ bool ParseCsvFloatRow(const std::string& line, std::vector<float>& values)
     return !values.empty();
 }
 
+std::vector<std::string> SplitCsvLine(const std::string& line)
+{
+    std::vector<std::string> cells;
+    std::stringstream ss(line);
+    std::string cell;
+    while (std::getline(ss, cell, ','))
+    {
+        cells.push_back(cell);
+    }
+    return cells;
+}
+
 bool LoadAmpObsRow(const std::string& file_path, int row_index, std::vector<float>& obs_row)
 {
     std::ifstream file(file_path);
@@ -79,6 +92,69 @@ bool LoadAmpObsRow(const std::string& file_path, int row_index, std::vector<floa
         }
     }
     return false;
+}
+
+bool LoadAmpObsRowWithBaseQuat(
+    const std::string& file_path,
+    int row_index,
+    std::vector<float>& obs_row,
+    std::vector<float>& base_quat_wxyz)
+{
+    std::ifstream file(file_path);
+    if (!file.is_open())
+    {
+        return false;
+    }
+
+    std::string header_line;
+    if (!std::getline(file, header_line))
+    {
+        return false;
+    }
+    const std::vector<std::string> headers = SplitCsvLine(header_line);
+
+    std::string data_line;
+    for (int i = 0; i <= row_index; ++i)
+    {
+        if (!std::getline(file, data_line))
+        {
+            return false;
+        }
+    }
+
+    if (!ParseCsvFloatRow(data_line, obs_row) || obs_row.size() < 89)
+    {
+        return false;
+    }
+
+    const std::vector<std::string> quat_cols = {
+        "base_quat_w", "base_quat_x", "base_quat_y", "base_quat_z"
+    };
+    std::vector<int> quat_indices;
+    quat_indices.reserve(4);
+    for (const std::string& name : quat_cols)
+    {
+        auto it = std::find(headers.begin(), headers.end(), name);
+        if (it == headers.end())
+        {
+            base_quat_wxyz.clear();
+            return true;
+        }
+        quat_indices.push_back(static_cast<int>(std::distance(headers.begin(), it)));
+    }
+
+    base_quat_wxyz.clear();
+    for (int idx : quat_indices)
+    {
+        if (idx < 0 || idx >= static_cast<int>(obs_row.size()))
+        {
+            base_quat_wxyz.clear();
+            return true;
+        }
+        base_quat_wxyz.push_back(obs_row[idx]);
+    }
+    base_quat_wxyz = QuaternionNormalize(base_quat_wxyz);
+    return true;
 }
 
 float MaxAbsSliceDiff(const std::vector<float>& a, const std::vector<float>& b, int off, int n)
@@ -461,7 +537,8 @@ bool RL_Sim::ApplyWholeBodyTrackingInitPoseFromAmpObs()
                                   this->config_name + "/" + pose_file;
 
     std::vector<float> obs_row;
-    if (!LoadAmpObsRow(pose_path, pose_row, obs_row))
+    std::vector<float> full_base_quat_wxyz;
+    if (!LoadAmpObsRowWithBaseQuat(pose_path, pose_row, obs_row, full_base_quat_wxyz))
     {
         std::cout << LOGGER::WARNING << "[Sim2SimInitPose] Failed to load row " << pose_row
                   << " from " << pose_path << std::endl;
@@ -485,8 +562,26 @@ bool RL_Sim::ApplyWholeBodyTrackingInitPoseFromAmpObs()
     // H-H rejected: writing ampobs joint_vel to qvel did not survive to step1
     // (mj_forward / RobotControl absorbed it). Keep qvel = 0 on init.
     const float root_z = obs_row[42];
-    std::vector<float> base_quat = TangentNormal6DToQuaternion(
-        obs_row[43], obs_row[44], obs_row[45], obs_row[46], obs_row[47], obs_row[48]);
+    std::vector<float> base_quat = full_base_quat_wxyz;
+    std::string base_quat_source = "ampobs full base_quat_wxyz";
+    if (base_quat.size() != 4)
+    {
+        base_quat = this->params.Get<std::vector<float>>("sim2sim_init_base_quat_wxyz", {});
+        base_quat_source = "config sim2sim_init_base_quat_wxyz";
+    }
+    if (base_quat.size() != 4)
+    {
+        // Legacy fallback only recovers tilt after root_rot_6d became headingless;
+        // keep it for old CSVs, but it cannot recover the Isaac yaw component.
+        base_quat = TangentNormal6DToQuaternion(
+            obs_row[43], obs_row[44], obs_row[45], obs_row[46], obs_row[47], obs_row[48]);
+        base_quat_source = "headingless 6D fallback (yaw lost)";
+        std::cout << LOGGER::WARNING
+                  << "[Sim2SimInitPose] ampobs has no base_quat_w/x/y/z and config has no "
+                  << "sim2sim_init_base_quat_wxyz; falling back to headingless 6D, yaw is lost."
+                  << std::endl;
+    }
+    base_quat = QuaternionNormalize(base_quat);
 
     const float root_x = (this->mj_data->qpos[0]);
     const float root_y = (this->mj_data->qpos[1]);
@@ -521,12 +616,12 @@ bool RL_Sim::ApplyWholeBodyTrackingInitPoseFromAmpObs()
         }
     }
 
+    // Sim2Sim entry experiment:
+    // zero the full generalized velocity (base + all joints), so dance starts
+    // from a static velocity state and avoids joint-velocity mismatch at t=0.
     for (int i = 0; i < this->mj_model->nv; ++i)
     {
-        if (i < 6)
-        {
-            this->mj_data->qvel[i] = 0.0f;
-        }
+        this->mj_data->qvel[i] = 0.0f;
     }
     mj_forward(this->mj_model, this->mj_data);
 
@@ -537,7 +632,8 @@ bool RL_Sim::ApplyWholeBodyTrackingInitPoseFromAmpObs()
 
     std::cout << LOGGER::INFO << "[Sim2SimInitPose] Applied ampobs row " << pose_row
               << " from " << pose_file << " (root_z=" << root_z
-              << ", progress=" << obs_row[88] << ")" << std::endl;
+              << ", progress=" << obs_row[88]
+              << ", base_quat_source=" << base_quat_source << ")" << std::endl;
     return true;
 }
 

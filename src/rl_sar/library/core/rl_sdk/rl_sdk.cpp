@@ -8,6 +8,44 @@
 #include <iomanip>
 #include <filesystem>
 
+namespace
+{
+// whole_body_tracking orientation pipeline (IsaacLab aligned):
+//   q_wxyz --normalize--> q
+//          --remove_yaw--> q_tilt = conj(yaw_quat(q)) * q
+//          --to 6D-------> [quat_apply(q_tilt, e_x), quat_apply(q_tilt, e_z)]
+inline std::vector<float> ComputeHeadinglessRootRot6D(
+    const std::vector<float>& base_quat_wxyz, bool swap_xy)
+{
+    std::vector<float> root_rot_6d(6, 0.0f);
+    if (base_quat_wxyz.size() != 4)
+    {
+        return root_rot_6d;
+    }
+
+    // Keep wxyz convention consistent with IsaacLab/Unitree integration path.
+    const std::vector<float> q_norm = QuaternionNormalize(base_quat_wxyz);
+    const std::vector<float> q_yaw = QuaternionYawOnly(q_norm);
+    std::vector<float> q_headingless =
+        QuaternionMultiply(QuaternionConjugate(q_yaw), q_norm);
+    q_headingless = QuaternionNormalize(q_headingless);
+
+    const std::vector<float> tangent = QuatApply(q_headingless, {1.0f, 0.0f, 0.0f});
+    const std::vector<float> normal = QuatApply(q_headingless, {0.0f, 0.0f, 1.0f});
+    root_rot_6d = {
+        tangent[0], tangent[1], tangent[2],
+        normal[0], normal[1], normal[2]
+    };
+
+    if (swap_xy)
+    {
+        std::swap(root_rot_6d[0], root_rot_6d[1]);
+        std::swap(root_rot_6d[3], root_rot_6d[4]);
+    }
+    return root_rot_6d;
+}
+} // namespace
+
 // Out-of-line ctor/dtor 让 unique_ptr<KinematicsFK> 能在这里看到完整类型，
 // 否则 hpp 里的 forward-decl + inline dtor 会触发 sizeof incomplete type 报错。
 RL::RL() = default;
@@ -206,24 +244,9 @@ std::vector<float> RL::ComputeObservation()
         }
         else if (observation == "whole_body_tracking/ref_body_quat_tan_norm")
         {
-            // Isaac humanoid_amp: quaternion_to_tangent_and_normal
-            // tangent = quat_apply(q, [1,0,0]), normal = quat_apply(q, [0,0,1])
-            std::vector<float> root_rot_6d(6, 0.0f);
-            if (this->obs.base_quat.size() == 4)
-            {
-                const std::vector<float> tangent = QuatApply(this->obs.base_quat, {1.0f, 0.0f, 0.0f});
-                const std::vector<float> normal = QuatApply(this->obs.base_quat, {0.0f, 0.0f, 1.0f});
-                root_rot_6d = {
-                    tangent[0], tangent[1], tangent[2],
-                    normal[0], normal[1], normal[2]
-                };
-
-                if (this->params.Get<bool>("root_rot_6d_swap_xy", false))
-                {
-                    std::swap(root_rot_6d[0], root_rot_6d[1]);
-                    std::swap(root_rot_6d[3], root_rot_6d[4]);
-                }
-            }
+            // IsaacLab aligned path: normalize -> remove_yaw -> tangent+normal(6D).
+            const std::vector<float> root_rot_6d = ComputeHeadinglessRootRot6D(
+                this->obs.base_quat, this->params.Get<bool>("root_rot_6d_swap_xy", false));
             obs_list.push_back(root_rot_6d);
         }
         else if (observation == "whole_body_tracking/key_body_pos_relative")
@@ -1109,21 +1132,8 @@ void RL::CSVLoggerTrace(
     }
     file << root_z << ",";
 
-    std::vector<float> root_rot_6d(6, 0.0f);
-    if (this->obs.base_quat.size() == 4)
-    {
-        const std::vector<float> tangent = QuatApply(this->obs.base_quat, {1.0f, 0.0f, 0.0f});
-        const std::vector<float> normal = QuatApply(this->obs.base_quat, {0.0f, 0.0f, 1.0f});
-        root_rot_6d = {
-            tangent[0], tangent[1], tangent[2],
-            normal[0], normal[1], normal[2]
-        };
-        if (this->params.Get<bool>("root_rot_6d_swap_xy", false))
-        {
-            std::swap(root_rot_6d[0], root_rot_6d[1]);
-            std::swap(root_rot_6d[3], root_rot_6d[4]);
-        }
-    }
+    const std::vector<float> root_rot_6d = ComputeHeadinglessRootRot6D(
+        this->obs.base_quat, this->params.Get<bool>("root_rot_6d_swap_xy", false));
     CsvWriteFixed(file, root_rot_6d, 6);
 
     const std::vector<int> default_key_body_joint_indices = {9, 10, 13, 14, 17, 18, 20, 19, 5, 7, 6, 12, 11};

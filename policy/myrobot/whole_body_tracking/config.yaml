@@ -3,10 +3,10 @@
 
 myrobot/whole_body_tracking:
   model_name: "policy.pt"
-  # 91 = 89 (AMP obs: 21+21+1+6+39+1) + 2 (policy-only base xy in env-local frame).
-  # AMP discriminator 仍只看 89 维, base_xy 是 policy 专属额外特征。
-  num_observations: 91
-  observations: ["whole_body_tracking/joint_pos", "whole_body_tracking/joint_vel", "whole_body_tracking/root_pos_relative", "whole_body_tracking/ref_body_quat_tan_norm", "whole_body_tracking/key_body_pos_relative", "whole_body_tracking/progress", "whole_body_tracking/root_xy_relative"]
+  # 89 = 21+21+1+6+39+1（joint_pos, joint_vel, root_z, root_rot_6d, key_body_pos_rel, progress）
+  # 新策略不使用 base_xy，部署侧与策略输入维度保持严格对齐。
+  num_observations: 89
+  observations: ["whole_body_tracking/joint_pos", "whole_body_tracking/joint_vel", "whole_body_tracking/root_pos_relative", "whole_body_tracking/ref_body_quat_tan_norm", "whole_body_tracking/key_body_pos_relative", "whole_body_tracking/progress"]
   observations_history: []  # 0 is the latest observation
   observations_history_priority: "time"  # "time" or "term" priority
   # Sim2sim alignment with Isaac training (myrobot_amp): 60Hz policy, 17.1s episode.
@@ -17,6 +17,7 @@ myrobot/whole_body_tracking:
   # H-3 revisited: telemetry showed amp row 0 base orientation = +Y (not +X like
   # Mujoco default), so RSI-style spawn from ampobs row is required for progress=0.
   enable_sim2sim_init_pose: true
+  sim2sim_init_base_quat_wxyz: [0.707103728, 0.002091072, -0.046408906, 0.705582142]
   sim2sim_init_pose_file: "ampobs.csv"
   sim2sim_init_pose_row: 0
   # For ref_body_quat_tan_norm: quaternion_to_tangent_and_normal (no swap).
