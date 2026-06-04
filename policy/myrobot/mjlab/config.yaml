@@ -1,0 +1,162 @@
+# Copyright (c) 2024-2025 Ziqi Fan
+# SPDX-License-Identifier: Apache-2.0
+#
+# config.yaml for rl_real_myrobot.cpp -> mjlab whole-body tracking policy.
+#
+# 主要功能：mjlab (tasks.tracking) 在 MuJoCo 中直接训练的全身动作跟踪策略的真机部署配置。
+# 运行逻辑：
+#   - ONNX 双输入(obs[114] + time_step[1]) / 多输出(actions + baked motion gather)。
+#   - 归一化(running_mean/var)已烧进 ONNX，C++ 只喂原始 obs（仅 clip_obs 夹紧）。
+#   - 加载时一次性抽取 852 帧 baked motion 缓存（BuildMjlabMotionTable），运行时按相位
+#     t = episode_length_buf - 1 查表拼 command(42) 与 motion_anchor_ori_b(6)。
+#   - 策略 50Hz（dt_env = 0.005 * 4 = 0.02s）；play 模式从帧 0 起步，播满 852 帧自动退出。
+# 使用方法：GetUp 到 default_dof_pos 后按 Num3 / 手柄进入 RLFSMStateRLMjlabTracking。
+#
+# 关节顺序：URDF/XML 顺序（右腿、左腿、腰、右臂、左臂、头），真机 joint_mapping 用恒等映射。
+#   0 right_hip_pitch   1 right_hip_roll   2 right_hip_yaw   3 right_knee
+#   4 right_ankle_pitch 5 right_ankle_roll 6 left_hip_pitch  7 left_hip_roll
+#   8 left_hip_yaw      9 left_knee       10 left_ankle_pitch 11 left_ankle_roll
+#  12 waist_pitch      13 waist_yaw       14 right_shoulder_pitch 15 right_shoulder_roll
+#  16 right_elbow      17 left_shoulder_pitch 18 left_shoulder_roll 19 left_elbow 20 head
+
+myrobot/mjlab:
+  dt: 0.005
+  decimation: 4
+  # 显式写死 50Hz 控制频率，避免依赖可能误配的 dt/decimation 回退路径。
+  policy_step_time: 0.02
+  model_name: "policy.onnx"
+
+  # 114 = command(42=ref_joint_pos21+ref_joint_vel21) + motion_anchor_ori_b(6)
+  #       + base_ang_vel(3) + joint_pos(21) + joint_vel(21) + actions(21)
+  # 顺序严格对齐 mjlab env.yaml observations.actor.terms。
+  num_observations: 114
+  observations: ["mjlab/command", "mjlab/motion_anchor_ori_b", "ang_vel", "dof_pos", "dof_vel", "actions"]
+  observations_history: []
+  observations_history_priority: "time"
+  clip_obs: 100.0
+
+  # ====== mjlab baked motion 表抽取 / ONNX IO 名称 ======
+  # ONNX 右支把 852 帧参考动作以常量形式烧进图，加载时遍历 time_step=0..N-1 抽取缓存。
+  mjlab_motion_frames: 852          # 与 ONNX Clip(max=851) 对应的帧数
+  mjlab_anchor_body_index: 0        # anchor body (base_link) 在 body_quat_w 里的行索引
+  mjlab_input_obs_name: "obs"
+  mjlab_input_time_name: "time_step"
+  mjlab_output_joint_pos_name: "joint_pos"
+  mjlab_output_joint_vel_name: "joint_vel"
+  mjlab_output_body_quat_name: "body_quat_w"
+  mjlab_output_actions_name: "actions"
+
+  # mjlab 训练 action clip=null（无裁剪）。clip_actions_lower/upper 不定义 ->
+  # Forward 直接返回原始 actions，last_action 即 raw policy 输出，与训练一致。
+  # ComputeOutput 侧用 disable_action_clip 关闭 scaled-action 裁剪。
+  disable_action_clip: true
+
+  # PD 增益：对齐 mjlab env.yaml 各 actuator group 的 stiffness / damping。
+  #   hip(pitch/roll/yaw)/knee/shoulder_pitch = 8 ; ankle(pitch/roll) = 6 ;
+  #   waist(pitch/yaw)/shoulder_roll = 24 ; elbow/head = 5 ; damping 全 1。
+  rl_kp: [8, 8, 8, 8, 6, 6,
+          8, 8, 8, 8, 6, 6,
+          24, 24,
+          8, 24, 5,
+          8, 24, 5,
+          5]
+  rl_kd: [1, 1, 1, 1, 1, 1,
+          1, 1, 1, 1, 1, 1,
+          1, 1,
+          1, 1, 1,
+          1, 1, 1,
+          1]
+  # Passive / GetUp / hold 阶段的固定增益，沿用与策略相同的 PD。
+  fixed_kp: [8, 8, 8, 8, 6, 6,
+             8, 8, 8, 8, 6, 6,
+             24, 24,
+             8, 24, 5,
+             8, 24, 5,
+             5]
+  fixed_kd: [1, 1, 1, 1, 1, 1,
+             1, 1, 1, 1, 1, 1,
+             1, 1,
+             1, 1, 1,
+             1, 1, 1,
+             1]
+
+  num_of_dofs: 21
+
+  # 相位上限：播满 852 帧（t=0..851）后由 FSM 自动切 GetDown。
+  max_episode_length: 852
+
+  # 动作映射（对齐 mjlab env.yaml actions.joint_pos, use_default_offset=true, offset=0）:
+  #   q_target = default_dof_pos + action_scale (.) action
+  # 对应 ComputeOutput 的 default_position 分支。
+  action_type: "default_position"
+  action_scale: [0.06125, 0.06125, 0.06125, 0.06125, 0.12258333333333334, 0.12258333333333334,
+                 0.06125, 0.06125, 0.06125, 0.06125, 0.12258333333333334, 0.12258333333333334,
+                 0.030625, 0.030625,
+                 0.06125, 0.030625, 0.02205,
+                 0.06125, 0.030625, 0.02205,
+                 0.02205]
+  action_deadzone_lower: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  action_deadzone_upper: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+  wheel_indices: []
+
+  # mjlab actor 各项无 scale（env.yaml scale: null -> 1.0）。
+  ang_vel_scale: 1.0
+  dof_pos_scale: 1.0
+  dof_vel_scale: 1.0
+  commands_scale: [1.0, 1.0, 1.0]
+
+  # mjlab 无 yaw-hold（动作完全由 motion tracking 决定）。
+  yaw_hold_enable: false
+
+  # 启动平滑：进入状态时从当前关节角 blend 到策略目标，避免首帧 q_target 跳变。
+  rl_blend_duration: 0.2
+  dance_min_startup_blend_duration: 0.5
+
+  # 力矩限制：对齐 mjlab env.yaml 各 actuator group 的 effort_limit。
+  #   hip/knee/shoulder_pitch = 1.96 ; ankle = 2.942 ; waist/shoulder_roll = 2.94 ; elbow/head = 0.441
+  torque_limits: [1.96, 1.96, 1.96, 1.96, 2.942, 2.942,
+                  1.96, 1.96, 1.96, 1.96, 2.942, 2.942,
+                  2.94, 2.94,
+                  1.96, 2.94, 0.441,
+                  1.96, 2.94, 0.441,
+                  0.441]
+
+  # 默认姿态（URDF 顺序），对齐 mjlab env.yaml entities.robot.init_state.joint_pos。
+  default_dof_pos: [-0.3, -0.05, 0.004, 0.5, -0.1, -0.06,
+                    -0.3, 0.05, -0.004, 0.5, -0.1, -0.06,
+                    0.0, 0.0,
+                    0.0, 0.0, 0.0,
+                    0.0, 0.0, 0.0,
+                    0.0]
+
+  # joint_mapping[policy_idx] = ZMQ/IsaacSim motor_idx（见 robot_lab_real/base.yaml:27-36）。
+  # policy 训练序 = URDF/XML（right_* 块 -> left_* 块 -> waist -> arms -> head）。
+  #   policy 0 right_hip_pitch  -> Isaac 1
+  #   policy 1 right_hip_roll   -> Isaac 4
+  #   policy 2 right_hip_yaw    -> Isaac 7
+  #   policy 3 right_knee       -> Isaac 12
+  #   policy 4 right_ankle_pitch-> Isaac 16
+  #   policy 5 right_ankle_roll -> Isaac 20
+  #   policy 6 left_hip_pitch   -> Isaac 0
+  #   policy 7 left_hip_roll    -> Isaac 3
+  #   policy 8 left_hip_yaw     -> Isaac 6
+  #   policy 9 left_knee        -> Isaac 11
+  #   policy 10 left_ankle_pitch-> Isaac 15
+  #   policy 11 left_ankle_roll -> Isaac 19
+  #   policy 12 waist_pitch     -> Isaac 2
+  #   policy 13 waist_yaw       -> Isaac 5
+  #   policy 14 right_shoulder_pitch -> Isaac 10
+  #   policy 15 right_shoulder_roll  -> Isaac 14
+  #   policy 16 right_elbow     -> Isaac 18
+  #   policy 17 left_shoulder_pitch  -> Isaac 9
+  #   policy 18 left_shoulder_roll   -> Isaac 13
+  #   policy 19 left_elbow      -> Isaac 17
+  #   policy 20 head            -> Isaac 8
+  joint_mapping: [1, 4, 7, 12, 16, 20, 0, 3, 6, 11, 15, 19, 2, 5, 10, 14, 18, 9, 13, 17, 8]
+
+  # ====== Sim-to-Real 噪声（mjlab 直接在 MuJoCo 训练，真机部署喂干净观测，全置 0）======
+  noise_ang_vel: 0.0
+  noise_dof_pos: 0.0
+  noise_dof_vel: 0.0
+  noise_projected_gravity: 0.0

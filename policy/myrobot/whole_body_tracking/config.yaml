@@ -11,7 +11,7 @@ myrobot/whole_body_tracking:
   observations_history_priority: "time"  # "time" or "term" priority
   # Sim2sim alignment with Isaac training (myrobot_amp): 60Hz policy, 17.1s episode.
   policy_step_time: 0.0166666667  # 1/60 s
-  episode_duration_seconds: 17.1
+  episode_duration_seconds: 27.1
   max_episode_length: 1026  # round(17.1 * 60), 与 env.yaml episode_length_s 对齐
   # Phase A sim2sim: teleport MuJoCo to Isaac ampobs row on Dance Enter.
   # H-3 revisited: telemetry showed amp row 0 base orientation = +Y (not +X like
@@ -65,18 +65,18 @@ myrobot/whole_body_tracking:
   #   q_target   = clip(q_target, q_target_lower, q_target_upper)
   # 训练侧 action_scale 是单一标量 0.25 (所有 21 个关节相同), 这里展开成数组方便
   # 单独 ablation; 默认应整体保持 0.25。
-  action_scale: [0.25, 0.25,    #0~1      hip pitch
-                 0.25,          #2        waist pitch
-                 0.25, 0.25,    #3~4      hip roll
-                 0.25,          #5        waist_yaw
-                 0.25, 0.25,    #6~7      hip yaw
-                 0.25,          #8        head
-                 0.25, 0.25,    #9~10     shoulder pitch
-                 0.25, 0.25,    #11~12    knee
-                 0.25, 0.25,    #13~14    shoulder roll
-                 0.25, 0.25,    #15~16    ankle pitch
-                 0.25, 0.25,    #17~18    elbow
-                 0.25, 0.25]    #19~20    ankle roll
+  action_scale: [0.2500, 0.2500,    #0~1      hip pitch
+                 0.2500,          #2        waist pitch
+                 0.2500, 0.2500,    #3~4      hip roll
+                 0.2500,          #5        waist_yaw
+                 0.2500, 0.2500,    #6~7      hip yaw
+                 0.2500,          #8        head
+                 0.2500, 0.2500,    #9~10     shoulder pitch
+                 0.2500, 0.2500,    #11~12    knee
+                 0.2500, 0.2500,    #13~14    shoulder roll
+                 0.2500, 0.2500,    #15~16    ankle pitch
+                 0.2500, 0.2500,    #17~18    elbow
+                 0.2500, 0.2500]    #19~20    ankle roll
   # delta action, q_target = q_current + delta, 走 ComputeOutput 的 relative_position 分支。
   action_type: "relative_position"
   # 旧 absolute-position-from-soft-limits 路径关闭 (delta 路径不需要 offset/scale 映射)。

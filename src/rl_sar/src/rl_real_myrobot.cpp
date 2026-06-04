@@ -10,6 +10,7 @@
  */
 
 #include "rl_real_myrobot.hpp"
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <ctime>
@@ -88,18 +89,6 @@ RL_Real::RL_Real(int argc, char **argv)
     this->loop_plot = std::make_shared<LoopFunc>("loop_plot", 0.002, std::bind(&RL_Real::Plot, this));
     this->loop_plot->start();
 #endif
-#ifdef CSV_LOGGER
-    // Full-trajectory logger: runs independently of the RL loop, writes
-    // every FSM state (Passive -> GetUp -> RLLocomotion -> GetDown -> ...)
-    // into <policy_dir>/myrobot/trace.csv until the program is killed.
-    // Period 20 ms (50 Hz) is sufficient for offline motion diagnosis and
-    // keeps file size reasonable (~6 MB / hour per 21-DoF robot).
-    this->CSVInitTrace(this->robot_name);
-    this->log_t0 = std::chrono::steady_clock::now();
-    this->loop_log = std::make_shared<LoopFunc>("loop_log", 0.02, std::bind(&RL_Real::LogTick, this));
-    this->loop_log->start();
-#endif
-
     std::cout << LOGGER::INFO << "RL_Real (myrobot) started" << std::endl;
     std::cout << LOGGER::INFO << "[ZMQ] SUB: tcp://" << zmq_pi_ip << ":" << zmq_state_port << " topic=" << zmq_state_topic << std::endl;
     std::cout << LOGGER::INFO << "[ZMQ] PUB: tcp://*:" << zmq_cmd_port << " topic=" << zmq_cmd_topic << std::endl;
@@ -241,59 +230,6 @@ bool RL_Real::ReceiveState()
 
     state_received.store(true);
 
-    // ------------------------------------------------------------------------
-    // [上半身 obs 字段诊断打印] — 节流到 ~1Hz
-    //
-    // 排查链路（rl_sar/dance）：
-    //   电机端编码器 → CAN → Pi motor_reader → ZMQ "low_state" 包 flat[0:42]
-    //                                            ↑↑↑  这里就是当前位置
-    //   → PC SUB → state_q/state_qd → robot_state.motor_state.q/dq
-    //   → obs.dof_pos/dof_vel → policy.forward(obs)
-    //
-    // PC 端 (上面循环 flat[i] → state_q[i]) 是无脑全量复制，21 路都填，必然 OK。
-    // 因此若打印值有以下任一异常 → 故障点铁定在 Pi 端及更上游：
-    //
-    //   1) 上半身 q 长期为 ~0 且与下半身/IMU 抖动幅度不匹配
-    //      → Pi motor_reader 没读到这几路电机
-    //        (motor_ids 配置缺失 / CAN bus 未 attach / 电机扭矩使能未开)
-    //   2) 上半身 q 完全不变但下半身实时跟随
-    //      → 上半身电机在线但反馈被 freeze（电机进入掉电/待机模式）
-    //   3) dq 始终为 0 而 q 在变
-    //      → Pi 端只填了位置、速度估计未做 (差分窗口失效)
-    //
-    // 仅用于诊断，对策略行为无影响。
-    // 上半身关节（IsaacSim 训练顺序，与 obs.dof_pos 完全对齐）：
-    //   2=waist_pitch  5=waist_yaw  8=head
-    //   9=sh_pitch_R 10=sh_pitch_L 13=sh_roll_R 14=sh_roll_L
-    //  17=elbow_R   18=elbow_L
-    // ------------------------------------------------------------------------
-    {
-        static const std::array<int, 9> upper_idx = {2, 5, 8, 9, 10, 13, 14, 17, 18};
-        static const char* upper_name[9] = {
-            "waP", "waY", "hd", "spR", "spL", "srR", "srL", "elR", "elL"
-        };
-        static auto last_dbg_t = std::chrono::steady_clock::now();
-        auto now_t = std::chrono::steady_clock::now();
-        if (std::chrono::duration<float>(now_t - last_dbg_t).count() >= 1.0f)
-        {
-            last_dbg_t = now_t;
-
-            std::ostringstream oss;
-            oss << std::fixed << std::setprecision(3);
-            oss << "[UpperObs] q:";
-            for (int k = 0; k < 9; ++k)
-            {
-                oss << " " << upper_name[k] << "=" << state_q[upper_idx[k]];
-            }
-            oss << std::setprecision(2) << " | dq:";
-            for (int k = 0; k < 9; ++k)
-            {
-                oss << " " << upper_name[k] << "=" << state_qd[upper_idx[k]];
-            }
-            std::cout << oss.str() << std::endl;
-        }
-    }
-
     zmq_msg_close(&msg);
     return true;
 }
@@ -364,17 +300,12 @@ void RL_Real::GetState(RobotState<float> *state)
 
 void RL_Real::SetCommand(const RobotCommand<float> *command)
 {
-    // Copy command to send buffer (no mapping needed)
+    // motor_command.q 为 policy 训练序；ZMQ q_cmd 需 IsaacSim 序（见 joint_mapping）。
+    const std::vector<float> q_motor =
+        this->PolicyCommandToMotorOrder(command->motor_command.q);
     for (int i = 0; i < this->params.Get<int>("num_of_dofs"); ++i)
     {
-        cmd_q[i] = command->motor_command.q[i];
-    }
-
-    // DEBUG: Print every 200 iterations (~1 second at 200Hz)
-    static int cmd_debug_counter = 0;
-    if (++cmd_debug_counter % 200 == 0)
-    {
-        std::cout << "[DEBUG] SetCommand cmd_q[0:3]: " << cmd_q[0] << ", " << cmd_q[1] << ", " << cmd_q[2] << std::endl;
+        cmd_q[i] = (i < static_cast<int>(q_motor.size())) ? q_motor[i] : 0.0f;
     }
 
     // Send via ZMQ
@@ -485,6 +416,57 @@ bool RL_Real::LoadDanceStaticRef()
 void RL_Real::OnPolicyConfigLoaded()
 {
     UpdatePolicyLoopPeriod();
+
+    // mjlab whole-body tracking 分支：
+    //   - 50Hz 控制频率已由 UpdatePolicyLoopPeriod()(policy_step_time=0.02) 设好；
+    //   - 一次性抽取 852 帧 baked motion 表供 ComputeObservation 查表；
+    //   - 打印 mjlab 专用安全说明，并直接返回，跳过下面 whole_body_tracking 的 FK / 静态参考逻辑。
+    if (this->config_name == "mjlab")
+    {
+        const bool table_ok = this->BuildMjlabMotionTable();
+        const int obs_dim = this->params.Get<int>("num_observations", 114);
+        const float policy_hz = 1.0f / std::max(this->GetPolicyStepTime(), 1e-6f);
+        const float action_scale_first =
+            this->params.Get<std::vector<float>>("action_scale", {0.06125f}).front();
+#ifdef CSV_LOGGER
+        this->CSVInitPolicyObs(this->robot_name + "/" + this->config_name, obs_dim, "obs.csv");
+#endif
+
+        std::cout << "\n" << LOGGER::WARNING
+                  << "============================================================" << std::endl;
+        std::cout << LOGGER::WARNING
+                  << "[SafetyCheck] Entering mjlab WHOLE-BODY TRACKING." << std::endl;
+        std::cout << LOGGER::WARNING
+                  << "  - Policy obs dim: " << obs_dim
+                  << " (command42 + anchor_ori6 + ang_vel3 + joint_pos21 + joint_vel21 + actions21)." << std::endl;
+        std::cout << LOGGER::WARNING
+                  << "  - Action: DEFAULT-OFFSET position. q_target = default_dof_pos + action_scale(.)action"
+                  << " (first scale=" << action_scale_first << ", no action clip)." << std::endl;
+        std::cout << LOGGER::WARNING
+                  << "  - Control rate: " << policy_hz << " Hz (50Hz tracking, plays t=0.."
+                  << (this->params.Get<int>("mjlab_motion_frames", 852) - 1)
+                  << " then auto-exits to GetDown)." << std::endl;
+        if (table_ok)
+        {
+            std::cout << LOGGER::WARNING
+                      << "  - Baked motion table: " << this->mjlab_num_frames
+                      << " frames cached from ONNX (command/anchor_ori driven by phase)." << std::endl;
+        }
+        else
+        {
+            std::cout << LOGGER::ERROR
+                      << "  - Baked motion table: FAILED to build -> command/anchor_ori ZERO-FILLED," << std::endl;
+            std::cout << LOGGER::ERROR
+                      << "    policy will be strongly OOD. Check ONNX input/output names in config.yaml." << std::endl;
+        }
+        std::cout << LOGGER::WARNING
+                  << "  - Make sure: gantry attached / e-stop in hand / clear area." << std::endl;
+        std::cout << LOGGER::WARNING
+                  << "============================================================\n" << std::endl;
+
+        this->last_loaded_config_name = this->config_name;
+        return;
+    }
 
     // 首次切到 whole_body_tracking 时:
     //   1. 优先尝试在线 FK（rl_sdk 的 LoadFkModel + ComputeKeyBodyPosFK）；
@@ -635,8 +617,9 @@ void RL_Real::RunModel()
     }
 #endif
 
-    this->obs.dof_pos = this->robot_state.motor_state.q;
-    this->obs.dof_vel = this->robot_state.motor_state.dq;
+    // ZMQ flat[0:21] 为 IsaacSim 关节序；policy 训练序（mjlab=URDF）由 joint_mapping 重排。
+    this->obs.dof_pos = this->MotorStateToPolicyOrder(this->robot_state.motor_state.q);
+    this->obs.dof_vel = this->MotorStateToPolicyOrder(this->robot_state.motor_state.dq);
 
     // ----------------------------------------------------------------------
     // Dance (whole_body_tracking) 专用笛卡尔观测的填充策略，按优先级 fallback:
@@ -785,9 +768,36 @@ std::vector<float> RL_Real::Forward()
     }
 
     std::vector<float> clamped_obs = this->ComputeObservation();
+    this->last_policy_obs = clamped_obs;
 
     std::vector<float> actions;
-    if (!this->params.Get<std::vector<int>>("observations_history").empty())
+    if (this->config_name == "mjlab")
+    {
+        // mjlab tracking 走双输入 ONNX：inputs = {obs(114), time_step(1)}，只取 actions 输出。
+        // 图的左支(MLP)不消费 time_step（仅右支 Gather 用它查 baked motion），因此
+        // actions 实际只依赖 obs；这里仍按相位传 t，保持语义清晰并兼容未来耦合图。
+        const int obs_dim = static_cast<int>(clamped_obs.size());
+        long long t = static_cast<long long>(this->episode_length_buf) - 1;
+        if (t < 0) t = 0;
+        if (this->mjlab_num_frames > 0 && t > this->mjlab_num_frames - 1)
+        {
+            t = this->mjlab_num_frames - 1;
+        }
+        const std::string in_obs = this->params.Get<std::string>("mjlab_input_obs_name", std::string("obs"));
+        const std::string in_time = this->params.Get<std::string>("mjlab_input_time_name", std::string("time_step"));
+        const std::string out_act = this->params.Get<std::string>("mjlab_output_actions_name", std::string("actions"));
+        std::map<std::string, std::vector<float>> inputs = {
+            {in_obs,  clamped_obs},
+            {in_time, {static_cast<float>(t)}}
+        };
+        std::map<std::string, std::vector<int64_t>> shapes = {
+            {in_obs,  {1, static_cast<int64_t>(obs_dim)}},
+            {in_time, {1, 1}}
+        };
+        auto out = this->model->forward_io(inputs, shapes, {out_act});
+        actions = out.at(out_act).values;
+    }
+    else if (!this->params.Get<std::vector<int>>("observations_history").empty())
     {
         this->history_obs_buf.insert(clamped_obs);
         this->history_obs = this->history_obs_buf.get_obs_vec(this->params.Get<std::vector<int>>("observations_history"));
@@ -798,14 +808,32 @@ std::vector<float> RL_Real::Forward()
         actions = this->model->forward({clamped_obs});
     }
 
+    std::vector<float> returned_actions = actions;
     if (!this->params.Get<std::vector<float>>("clip_actions_upper").empty() && !this->params.Get<std::vector<float>>("clip_actions_lower").empty())
     {
-        return clamp(actions, this->params.Get<std::vector<float>>("clip_actions_lower"), this->params.Get<std::vector<float>>("clip_actions_upper"));
+        returned_actions = clamp(actions, this->params.Get<std::vector<float>>("clip_actions_lower"), this->params.Get<std::vector<float>>("clip_actions_upper"));
     }
-    else
+
+#ifdef CSV_LOGGER
+    if (this->config_name == "mjlab")
     {
-        return actions;
+        float progress = 0.0f;
+        const int max_episode_length = this->params.Get<int>("max_episode_length", 0);
+        if (max_episode_length > 1)
+        {
+            progress = static_cast<float>(this->episode_length_buf - 1) /
+                       static_cast<float>(max_episode_length - 1);
+        }
+        this->CSVLoggerPolicyObs(
+            static_cast<int>(this->episode_length_buf),
+            std::clamp(progress, 0.0f, 1.0f),
+            this->last_policy_obs,
+            returned_actions
+        );
     }
+#endif
+
+    return returned_actions;
 }
 
 #ifdef PLOT

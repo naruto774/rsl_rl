@@ -385,6 +385,54 @@ std::vector<float> RL::ComputeObservation()
             std::vector<float> phase_vec = {phase};
             obs_list.push_back(phase_vec);
         }
+        // ============= mjlab whole-body tracking observations =============
+        // 相位 t：RunModel 在调 ComputeObservation 之前已 episode_length_buf += 1，
+        // 第一拍 episode_length_buf=1 -> t=0，与 mjlab play 模式（从帧 0 起步）对齐。
+        // 夹紧到 [0, N-1]，等价于 ONNX 右支的 Clip(max=N-1)。
+        else if (observation == "mjlab/command")
+        {
+            // command(42) = [ref_joint_pos(21), ref_joint_vel(21)]，verbatim 取 baked motion
+            // 第 t 帧（绝对值，不减 default；与 mjlab generated_commands(motion) 对齐）。
+            const int num_dofs = this->params.Get<int>("num_of_dofs");
+            std::vector<float> command;
+            command.reserve(static_cast<size_t>(num_dofs) * 2);
+            if (this->mjlab_num_frames > 0 && !this->ref_joint_pos_mjlab.empty())
+            {
+                long long t = static_cast<long long>(this->episode_length_buf) - 1;
+                if (t < 0) t = 0;
+                if (t > this->mjlab_num_frames - 1) t = this->mjlab_num_frames - 1;
+                const auto& jp = this->ref_joint_pos_mjlab[static_cast<size_t>(t)];
+                const auto& jv = this->ref_joint_vel_mjlab[static_cast<size_t>(t)];
+                command.insert(command.end(), jp.begin(), jp.end());
+                command.insert(command.end(), jv.begin(), jv.end());
+            }
+            else
+            {
+                command.assign(static_cast<size_t>(num_dofs) * 2, 0.0f);
+            }
+            obs_list.push_back(command);
+        }
+        else if (observation == "mjlab/motion_anchor_ori_b")
+        {
+            // motion_anchor_ori_b(6)：参考 anchor 在机器人 base 系下的相对朝向，6D 表示。
+            //   q_rel = q_robot_base^{-1} ⊗ q_ref_anchor(t)，再取旋转矩阵前两列。
+            // 与 whole_body_tracking/motion_anchor_ori_b 同构，区别在于：
+            //   - anchor 是 base_link，机器人侧直接用 IMU base_quat（无需 waist 复合）；
+            //   - 参考四元数来自 baked motion 表 ref_anchor_quat_mjlab[t]。
+            std::vector<float> anchor_ori(6, 0.0f);
+            if (this->mjlab_num_frames > 0 && !this->ref_anchor_quat_mjlab.empty())
+            {
+                long long t = static_cast<long long>(this->episode_length_buf) - 1;
+                if (t < 0) t = 0;
+                if (t > this->mjlab_num_frames - 1) t = this->mjlab_num_frames - 1;
+                const std::vector<float>& ref_anchor_quat_w = this->ref_anchor_quat_mjlab[static_cast<size_t>(t)];
+                std::vector<float> robot_quat_inv = QuaternionConjugate(this->obs.base_quat);
+                std::vector<float> relative_quat = QuaternionMultiply(robot_quat_inv, ref_anchor_quat_w);
+                std::vector<float> rot_matrix = QuaternionToRotationMatrix(relative_quat);
+                anchor_ori = MatrixFirstTwoColumns(rot_matrix);
+            }
+            obs_list.push_back(anchor_ori);
+        }
     }
 
     this->obs_dims.clear();
@@ -539,9 +587,9 @@ void RL::ComputeOutput(const std::vector<float> &actions, std::vector<float> &ou
         actions_processed = clamp(actions_processed, clip_lower, clip_upper);
     }
 
-    // Use true actuator state for control targets/errors (not noisy observation tensors).
-    const std::vector<float>& q_current = this->robot_state.motor_state.q;
-    const std::vector<float>& dq_current = this->robot_state.motor_state.dq;
+    // Use true actuator state in policy joint order (motor/ZMQ may be IsaacSim order).
+    const std::vector<float> q_current = this->MotorStateToPolicyOrder(this->robot_state.motor_state.q);
+    const std::vector<float> dq_current = this->MotorStateToPolicyOrder(this->robot_state.motor_state.dq);
 
     // Optional post-processing safety (opt-in by config):
     // 1) q_target clamp to configured lower/upper bounds
@@ -730,6 +778,136 @@ int RL::InverseJointMapping(int idx) const
         if (joint_mapping[i] == idx) return (int)i;
     }
     return -1;
+}
+
+std::vector<float> RL::MotorStateToPolicyOrder(const std::vector<float>& src) const
+{
+    const int num_dofs = this->params.Get<int>("num_of_dofs");
+    auto joint_mapping = this->params.Get<std::vector<int>>("joint_mapping");
+    std::vector<float> out(static_cast<size_t>(num_dofs), 0.0f);
+    if (static_cast<int>(joint_mapping.size()) != num_dofs ||
+        static_cast<int>(src.size()) < num_dofs)
+    {
+        return out;
+    }
+    for (int policy_idx = 0; policy_idx < num_dofs; ++policy_idx)
+    {
+        const int motor_idx = joint_mapping[policy_idx];
+        if (motor_idx >= 0 && motor_idx < num_dofs)
+        {
+            out[policy_idx] = src[motor_idx];
+        }
+    }
+    return out;
+}
+
+std::vector<float> RL::PolicyCommandToMotorOrder(const std::vector<float>& src) const
+{
+    const int num_dofs = this->params.Get<int>("num_of_dofs");
+    auto joint_mapping = this->params.Get<std::vector<int>>("joint_mapping");
+    std::vector<float> out(static_cast<size_t>(num_dofs), 0.0f);
+    if (static_cast<int>(joint_mapping.size()) != num_dofs ||
+        static_cast<int>(src.size()) < num_dofs)
+    {
+        return out;
+    }
+    for (int policy_idx = 0; policy_idx < num_dofs; ++policy_idx)
+    {
+        const int motor_idx = joint_mapping[policy_idx];
+        if (motor_idx >= 0 && motor_idx < num_dofs)
+        {
+            out[motor_idx] = src[policy_idx];
+        }
+    }
+    return out;
+}
+
+bool RL::BuildMjlabMotionTable()
+{
+    // 数学背景：mjlab tracking ONNX 的右支是纯查表算子
+    //   ref(t) = Gather(MotionTable, clip(t, 0, N-1))
+    // 与左侧策略网络解耦（MLP 不消费 Gather 输出）。因此部署侧只要喂任意 obs +
+    // time_step=t，就能从 Gather 输出端读出第 t 帧的参考动作。这里一次性遍历
+    // t=0..N-1 把整张表抽出来缓存，运行时按相位查表，避免每拍二次前向。
+    this->ref_joint_pos_mjlab.clear();
+    this->ref_joint_vel_mjlab.clear();
+    this->ref_anchor_quat_mjlab.clear();
+    this->mjlab_num_frames = 0;
+
+    if (!this->model)
+    {
+        std::cout << LOGGER::WARNING << "[mjlab] BuildMjlabMotionTable: model not loaded." << std::endl;
+        return false;
+    }
+
+    const int num_dofs = this->params.Get<int>("num_of_dofs");
+    const int num_frames = this->params.Get<int>("mjlab_motion_frames", 852);
+    const int obs_dim = this->params.Get<int>("num_observations", 114);
+    const int anchor_idx = this->params.Get<int>("mjlab_anchor_body_index", 0);
+    const std::string in_obs = this->params.Get<std::string>("mjlab_input_obs_name", std::string("obs"));
+    const std::string in_time = this->params.Get<std::string>("mjlab_input_time_name", std::string("time_step"));
+    const std::string out_jp = this->params.Get<std::string>("mjlab_output_joint_pos_name", std::string("joint_pos"));
+    const std::string out_jv = this->params.Get<std::string>("mjlab_output_joint_vel_name", std::string("joint_vel"));
+    const std::string out_bq = this->params.Get<std::string>("mjlab_output_body_quat_name", std::string("body_quat_w"));
+
+    const std::vector<float> zero_obs(static_cast<size_t>(obs_dim), 0.0f);
+    const std::map<std::string, std::vector<int64_t>> shapes = {
+        {in_obs,  {1, static_cast<int64_t>(obs_dim)}},
+        {in_time, {1, 1}}
+    };
+
+    try
+    {
+        this->ref_joint_pos_mjlab.reserve(num_frames);
+        this->ref_joint_vel_mjlab.reserve(num_frames);
+        this->ref_anchor_quat_mjlab.reserve(num_frames);
+
+        for (int t = 0; t < num_frames; ++t)
+        {
+            std::map<std::string, std::vector<float>> inputs = {
+                {in_obs,  zero_obs},
+                {in_time, {static_cast<float>(t)}}
+            };
+            auto out = this->model->forward_io(inputs, shapes, {out_jp, out_jv, out_bq});
+
+            const std::vector<float>& jp = out.at(out_jp).values;
+            const std::vector<float>& jv = out.at(out_jv).values;
+            const std::vector<float>& bq = out.at(out_bq).values;
+
+            if (static_cast<int>(jp.size()) < num_dofs || static_cast<int>(jv.size()) < num_dofs)
+            {
+                throw std::runtime_error("joint_pos/joint_vel output smaller than num_of_dofs");
+            }
+
+            this->ref_joint_pos_mjlab.emplace_back(jp.begin(), jp.begin() + num_dofs);
+            this->ref_joint_vel_mjlab.emplace_back(jv.begin(), jv.begin() + num_dofs);
+
+            // body_quat_w 展平为 [body, 4]（w,x,y,z），取 anchor body 行。
+            std::vector<float> anchor_quat = {1.0f, 0.0f, 0.0f, 0.0f};
+            const int base = anchor_idx * 4;
+            if (base >= 0 && base + 3 < static_cast<int>(bq.size()))
+            {
+                anchor_quat = {bq[base + 0], bq[base + 1], bq[base + 2], bq[base + 3]};
+            }
+            this->ref_anchor_quat_mjlab.push_back(anchor_quat);
+        }
+    }
+    catch (const std::exception& e)
+    {
+        std::cout << LOGGER::ERROR << "[mjlab] BuildMjlabMotionTable failed: " << e.what()
+                  << " (check ONNX input/output names: in='" << in_obs << "','" << in_time
+                  << "' out='" << out_jp << "','" << out_jv << "','" << out_bq << "')" << std::endl;
+        this->ref_joint_pos_mjlab.clear();
+        this->ref_joint_vel_mjlab.clear();
+        this->ref_anchor_quat_mjlab.clear();
+        this->mjlab_num_frames = 0;
+        return false;
+    }
+
+    this->mjlab_num_frames = num_frames;
+    std::cout << LOGGER::INFO << "[mjlab] motion table built: " << num_frames
+              << " frames, dof=" << num_dofs << ", anchor_body_idx=" << anchor_idx << std::endl;
+    return true;
 }
 
 void RL::TorqueProtect(const std::vector<float>& origin_output_dof_tau)
@@ -1213,17 +1391,16 @@ void RL::CSVLoggerPolicyObs(int episode_step, float progress,
 
     std::ofstream file(this->policy_obs_csv_filename.c_str(), std::ios_base::app);
     file << std::fixed << std::setprecision(6);
-    file << episode_step << "," << progress << ",";
-    CsvWriteFixed(file, policy_obs, static_cast<int>(policy_obs.size()));
-    file << std::fixed << std::setprecision(4);
-    const int n_actions = static_cast<int>(actions.size());
+    file << episode_step << "," << progress;
+    for (float v : policy_obs)
+    {
+        file << "," << v;
+    }
+    const int n_actions = this->params.Get<int>("num_of_dofs");
+    const int have_actions = static_cast<int>(actions.size());
     for (int i = 0; i < n_actions; ++i)
     {
-        file << (i < n_actions ? actions[i] : 0.0f);
-        if (i + 1 < n_actions)
-        {
-            file << ",";
-        }
+        file << "," << (i < have_actions ? actions[i] : 0.0f);
     }
     file << std::endl;
     file.close();

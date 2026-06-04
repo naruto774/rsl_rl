@@ -356,9 +356,34 @@ public:
     unsigned long long episode_length_buf = 0;
     float motion_length = 0.0;
     int InverseJointMapping(int idx) const;
+    /// 将 motor_state（ZMQ/IsaacSim 关节序）重排为 policy 训练关节序。
+    /// joint_mapping[policy_idx] = motor_idx；out[policy_idx] = src[motor_idx]。
+    std::vector<float> MotorStateToPolicyOrder(const std::vector<float>& src) const;
+    /// policy 序关节目标写回 motor 序（SetCommand 用）：out[motor_idx] = src[policy_idx]。
+    std::vector<float> PolicyCommandToMotorOrder(const std::vector<float>& src) const;
 
     // Motion tracking (for mimic/dance tasks)
     std::unique_ptr<MotionLoader> motion_loader;
+
+    // ----------------------------------------------------------------------
+    // mjlab whole-body tracking: baked motion 参考表
+    //   mjlab 的 tracking ONNX 把 852 帧参考动作以常量形式烧进图（右支 Gather）。
+    //   部署侧加载时一次性遍历 time_step=0..N-1 跑 ONNX，把 Gather 输出抽出来缓存，
+    //   运行时按相位 t 查表填 obs 的 command(42) 与 motion_anchor_ori_b(6)。
+    //   layout：ref_joint_pos_mjlab[t] / ref_joint_vel_mjlab[t] 长度=num_of_dofs，
+    //           ref_anchor_quat_mjlab[t] = anchor body(base_link, idx 0) 的世界系四元数 [w,x,y,z]。
+    // ----------------------------------------------------------------------
+    int mjlab_num_frames = 0;
+    std::vector<std::vector<float>> ref_joint_pos_mjlab;   ///< [N][num_dofs] 参考关节角（绝对）
+    std::vector<std::vector<float>> ref_joint_vel_mjlab;   ///< [N][num_dofs] 参考关节速度
+    std::vector<std::vector<float>> ref_anchor_quat_mjlab; ///< [N][4] anchor 世界系四元数 [w,x,y,z]
+    /**
+     * 加载时从 mjlab tracking ONNX 抽取并缓存 baked motion 参考表。
+     * 依赖 model->forward_io（仅 ONNX backend 支持）。失败时清空表并返回 false，
+     * 调用方应保证后续 obs 的 command/anchor 项有零填充兜底。
+     * @return true 成功且 mjlab_num_frames > 0。
+     */
+    bool BuildMjlabMotionTable();
 
     // protect func
     void TorqueProtect(const std::vector<float> &origin_output_dof_tau);

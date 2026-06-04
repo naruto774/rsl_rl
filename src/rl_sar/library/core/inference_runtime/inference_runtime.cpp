@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <iostream>
 #include <numeric>
+#include <cmath>
 
 #ifdef USE_TORCH
 #include <ATen/Parallel.h>
@@ -236,6 +237,7 @@ void ONNXModel::setup_input_output_info()
     size_t num_input_nodes = session_->GetInputCount();
     input_node_names_.reserve(num_input_nodes);
     input_shapes_.reserve(num_input_nodes);
+    input_types_.reserve(num_input_nodes);
 
     for (size_t i = 0; i < num_input_nodes; ++i)
     {
@@ -247,6 +249,10 @@ void ONNXModel::setup_input_output_info()
         Ort::TypeInfo input_type_info = session_->GetInputTypeInfo(i);
         auto input_tensor_info = input_type_info.GetTensorTypeAndShapeInfo();
         auto input_dims = input_tensor_info.GetShape();
+
+        // Record element type so forward_io() can dispatch int/float per input
+        // (e.g. mjlab time_step is declared as int64 while obs is float32).
+        input_types_.push_back(input_tensor_info.GetElementType());
 
         std::vector<int64_t> shape;
         for (auto dim : input_dims)
@@ -322,6 +328,137 @@ std::vector<float> ONNXModel::extract_output_data(const std::vector<Ort::Value>&
 
     // Copy output data to vector
     std::vector<float> result(output_data, output_data + num_elements);
+
+    return result;
+}
+
+std::map<std::string, NamedTensorOut> ONNXModel::forward_io(
+    const std::map<std::string, std::vector<float>>& inputs,
+    const std::map<std::string, std::vector<int64_t>>& input_shapes,
+    const std::vector<std::string>& output_names)
+{
+    if (!loaded_)
+    {
+        throw std::runtime_error("Model not loaded");
+    }
+
+    Ort::MemoryInfo memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+
+    std::vector<const char*> in_names;
+    std::vector<Ort::Value> in_values;
+    // Backing stores must outlive session_->Run(); reserve so emplace_back never
+    // reallocates and invalidates the data pointers held by Ort::Value.
+    std::vector<std::vector<float>> float_store;
+    std::vector<std::vector<int64_t>> int64_store;
+    std::vector<std::vector<int32_t>> int32_store;
+    float_store.reserve(inputs.size());
+    int64_store.reserve(inputs.size());
+    int32_store.reserve(inputs.size());
+
+    for (const auto& kv : inputs)
+    {
+        const std::string& name = kv.first;
+        const std::vector<float>& vals = kv.second;
+
+        int idx = -1;
+        for (size_t i = 0; i < input_node_names_.size(); ++i)
+        {
+            if (input_node_names_[i] == name) { idx = static_cast<int>(i); break; }
+        }
+        if (idx < 0)
+        {
+            throw std::runtime_error("forward_io: unknown ONNX input name '" + name + "'");
+        }
+
+        std::vector<int64_t> shape;
+        auto sit = input_shapes.find(name);
+        if (sit != input_shapes.end())
+        {
+            shape = sit->second;
+        }
+        else
+        {
+            shape = { 1, static_cast<int64_t>(vals.size()) };
+        }
+
+        in_names.push_back(input_node_names_[idx].c_str());
+
+        const ONNXTensorElementDataType etype = input_types_[idx];
+        if (etype == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64)
+        {
+            int64_store.emplace_back();
+            auto& buf = int64_store.back();
+            buf.resize(vals.size());
+            for (size_t i = 0; i < vals.size(); ++i) buf[i] = static_cast<int64_t>(std::llround(vals[i]));
+            in_values.push_back(Ort::Value::CreateTensor<int64_t>(
+                memory_info, buf.data(), buf.size(), shape.data(), shape.size()));
+        }
+        else if (etype == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32)
+        {
+            int32_store.emplace_back();
+            auto& buf = int32_store.back();
+            buf.resize(vals.size());
+            for (size_t i = 0; i < vals.size(); ++i) buf[i] = static_cast<int32_t>(std::llround(vals[i]));
+            in_values.push_back(Ort::Value::CreateTensor<int32_t>(
+                memory_info, buf.data(), buf.size(), shape.data(), shape.size()));
+        }
+        else
+        {
+            float_store.emplace_back(vals);
+            auto& buf = float_store.back();
+            in_values.push_back(Ort::Value::CreateTensor<float>(
+                memory_info, buf.data(), buf.size(), shape.data(), shape.size()));
+        }
+    }
+
+    std::vector<const char*> out_names;
+    out_names.reserve(output_names.size());
+    for (const std::string& on : output_names)
+    {
+        bool found = false;
+        for (const auto& n : output_node_names_) { if (n == on) { found = true; break; } }
+        if (!found)
+        {
+            throw std::runtime_error("forward_io: unknown ONNX output name '" + on + "'");
+        }
+        out_names.push_back(on.c_str());
+    }
+
+    auto outputs = session_->Run(
+        Ort::RunOptions{nullptr},
+        in_names.data(), in_values.data(), in_values.size(),
+        out_names.data(), out_names.size());
+
+    std::map<std::string, NamedTensorOut> result;
+    for (size_t i = 0; i < output_names.size(); ++i)
+    {
+        auto info = outputs[i].GetTensorTypeAndShapeInfo();
+        std::vector<int64_t> shape = info.GetShape();
+        int64_t n = 1;
+        for (auto d : shape) { if (d > 0) n *= d; }
+
+        NamedTensorOut td;
+        td.shape = shape;
+        td.values.resize(static_cast<size_t>(n));
+
+        const ONNXTensorElementDataType et = info.GetElementType();
+        if (et == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64)
+        {
+            const int64_t* p = outputs[i].GetTensorData<int64_t>();
+            for (int64_t k = 0; k < n; ++k) td.values[k] = static_cast<float>(p[k]);
+        }
+        else if (et == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32)
+        {
+            const int32_t* p = outputs[i].GetTensorData<int32_t>();
+            for (int64_t k = 0; k < n; ++k) td.values[k] = static_cast<float>(p[k]);
+        }
+        else
+        {
+            const float* p = outputs[i].GetTensorData<float>();
+            std::copy(p, p + n, td.values.begin());
+        }
+        result[output_names[i]] = std::move(td);
+    }
 
     return result;
 }

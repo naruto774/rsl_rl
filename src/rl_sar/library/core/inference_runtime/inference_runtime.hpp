@@ -9,6 +9,8 @@
 #include <vector>
 #include <string>
 #include <memory>
+#include <map>
+#include <stdexcept>
 #include <filesystem>
 #include <algorithm>
 #include "logger.hpp"
@@ -23,6 +25,18 @@
 
 namespace InferenceRuntime
 {
+
+/**
+ * @brief Flattened named output tensor for multi-IO inference.
+ *
+ * values 以 row-major 展平存储；shape 为对应的张量维度（含 batch）。
+ * 无论模型输出是 float / int，这里统一转成 float 返回，方便上层观测拼装。
+ */
+struct NamedTensorOut
+{
+    std::vector<int64_t> shape;   ///< Tensor shape, e.g. {1, 21} or {1, 13, 4}
+    std::vector<float> values;    ///< Flattened row-major data
+};
 
 /**
  * @brief Model interface base class
@@ -53,6 +67,29 @@ public:
      * @return Inference result vector
      */
     virtual std::vector<float> forward(const std::vector<std::vector<float>>& inputs) = 0;
+
+    /**
+     * @brief Multi-input / multi-output inference (named tensors).
+     *
+     * 用于像 mjlab tracking 这类带多个输入(obs + time_step)和多个输出
+     * (actions + baked motion gather 输出)的图。调用方统一用 float 提供输入，
+     * runtime 会按模型声明的 element type 自适应转换（如 time_step 的 int64）。
+     *
+     * @param inputs        name -> 展平的 float 输入数据
+     * @param input_shapes  name -> 该输入的 shape（含 batch，如 {1,114} / {1,1}）
+     * @param output_names  需要取回的输出名列表
+     * @return name -> NamedTensorOut（shape + 展平 float 数据）
+     *
+     * 默认实现抛异常；仅 ONNXModel 支持。
+     */
+    virtual std::map<std::string, NamedTensorOut> forward_io(
+        const std::map<std::string, std::vector<float>>& inputs,
+        const std::map<std::string, std::vector<int64_t>>& input_shapes,
+        const std::vector<std::string>& output_names)
+    {
+        (void)inputs; (void)input_shapes; (void)output_names;
+        throw std::runtime_error("forward_io() not supported by this model backend");
+    }
 
     /**
      * @brief Get model type string
@@ -123,6 +160,7 @@ private:
     std::vector<std::string> output_node_names_;            ///< Output node names
     std::vector<std::vector<int64_t>> input_shapes_;        ///< Input shapes
     std::vector<std::vector<int64_t>> output_shapes_;       ///< Output shapes
+    std::vector<ONNXTensorElementDataType> input_types_;    ///< Input element types (for int/float dispatch)
 #endif
 
 public:
@@ -132,6 +170,10 @@ public:
     bool load(const std::string& model_path) override;
     bool is_loaded() const override { return loaded_; }
     std::vector<float> forward(const std::vector<std::vector<float>>& inputs) override;
+    std::map<std::string, NamedTensorOut> forward_io(
+        const std::map<std::string, std::vector<float>>& inputs,
+        const std::map<std::string, std::vector<int64_t>>& input_shapes,
+        const std::vector<std::string>& output_names) override;
     std::string get_model_type() const override { return "onnx"; }
 
 private:

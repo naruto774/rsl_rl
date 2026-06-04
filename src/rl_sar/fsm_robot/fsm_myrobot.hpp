@@ -93,6 +93,12 @@ public:
                 std::cout << LOGGER::INFO << "[FSMDebug] GetUp -> Dance trigger detected." << std::endl;
                 return "RLFSMStateRLWholeBodyTrackingDance";
             }
+            else if (rl.control.current_keyboard == Input::Keyboard::Num3 ||
+                     rl.control.current_gamepad == Input::Gamepad::RB_DPadLeft)
+            {
+                std::cout << LOGGER::INFO << "[FSMDebug] GetUp -> mjlab tracking trigger detected." << std::endl;
+                return "RLFSMStateRLMjlabTracking";
+            }
             else if (rl.control.current_keyboard == Input::Keyboard::Num9 || rl.control.current_gamepad == Input::Gamepad::B)
             {
                 return "RLFSMStateGetDown";
@@ -275,6 +281,11 @@ public:
                  rl.control.current_gamepad == Input::Gamepad::RB_DPadDown)
         {
             return "RLFSMStateRLWholeBodyTrackingDance";
+        }
+        else if (rl.control.current_keyboard == Input::Keyboard::Num3 ||
+                 rl.control.current_gamepad == Input::Gamepad::RB_DPadLeft)
+        {
+            return "RLFSMStateRLMjlabTracking";
         }
         return state_name_;
     }
@@ -470,6 +481,162 @@ public:
     }
 };
 
+// ---------------------------------------------------------------------------
+// mjlab whole-body tracking 部署状态（Num3 / 手柄 RB_DPadLeft 进入）。
+//
+// 主要功能：加载 mjlab tracking ONNX（config_name="mjlab"），抽取 baked motion 表，
+//           以 50Hz 按相位跟踪整段参考动作，播满 852 帧自动退出到 GetDown。
+// 运行逻辑：骨架与 WholeBodyTrackingDance 类似（hold->blend->策略接管），但：
+//   - 不依赖 MotionLoader / ampobs.csv / sim2sim init pose（mjlab 直接在 MuJoCo 训练）；
+//   - 观测/动作/频率全部由 mjlab/config.yaml 决定（114 维 / default_position / 50Hz）；
+//   - 参考动作来自 RL::BuildMjlabMotionTable() 缓存表，由 ComputeObservation 按 t 查表。
+// 使用方法：GetUp 到 default_dof_pos 后按 Num3 进入。
+// ---------------------------------------------------------------------------
+class RLFSMStateRLMjlabTracking : public RLFSMState
+{
+public:
+    RLFSMStateRLMjlabTracking(RL *rl) : RLFSMState(*rl, "RLFSMStateRLMjlabTracking") {}
+
+    void Enter() override
+    {
+        rl.episode_length_buf = 0;
+        rl.rl_wait_first_frame = true;
+        rl.rl_blend_active = false;
+        rl.rl_blend_time = 0.0f;
+        rl.rl_blend_duration = 0.2f;
+        std::vector<float> hold_q_old_order = fsm_state->motor_state.q;
+        std::vector<int> old_joint_mapping = rl.params.Get<std::vector<int>>("joint_mapping");
+        rl.hold_q_on_enter = hold_q_old_order;
+        rl.rl_blend_q_target = hold_q_old_order;
+        rl.rl_blend_dq_target.assign(rl.params.Get<int>("num_of_dofs"), 0.0f);
+
+        std::vector<float> stale_output;
+        while (rl.output_dof_pos_queue.try_pop(stale_output)) {}
+        while (rl.output_dof_vel_queue.try_pop(stale_output)) {}
+        while (rl.output_dof_tau_queue.try_pop(stale_output)) {}
+
+        rl.config_name = "mjlab";
+        std::string robot_config_path = rl.robot_name + "/" + rl.config_name;
+        try
+        {
+            rl.InitRL(robot_config_path);
+
+            // 启动平滑窗口：即使 rl_blend_duration 为 0，也保留一个最小 blend 窗口，
+            // 避免策略接管首帧 q_target 跳变。
+            const float rl_blend_duration_cfg =
+                std::max(0.0f, rl.params.Get<float>("rl_blend_duration", 0.2f));
+            const float min_startup_blend_duration =
+                std::max(0.0f, rl.params.Get<float>("dance_min_startup_blend_duration", 0.25f));
+            rl.rl_blend_duration = std::max(rl_blend_duration_cfg, min_startup_blend_duration);
+
+            auto new_joint_mapping = rl.params.Get<std::vector<int>>("joint_mapping");
+            const int num_dofs = rl.params.Get<int>("num_of_dofs");
+
+            // hold_q 关节顺序重映射（mjlab 与 base 均为恒等映射时为 no-op，仍保留以防 config 切换）。
+            bool remap_ok =
+                hold_q_old_order.size() == static_cast<size_t>(num_dofs) &&
+                old_joint_mapping.size() == static_cast<size_t>(num_dofs) &&
+                new_joint_mapping.size() == static_cast<size_t>(num_dofs);
+            if (remap_ok)
+            {
+                std::vector<float> hold_q_new_order(num_dofs, 0.0f);
+                for (int old_idx = 0; old_idx < num_dofs; ++old_idx)
+                {
+                    int actuator_id = old_joint_mapping[old_idx];
+                    int new_idx = -1;
+                    for (int idx = 0; idx < num_dofs; ++idx)
+                    {
+                        if (new_joint_mapping[idx] == actuator_id) { new_idx = idx; break; }
+                    }
+                    if (new_idx < 0) { remap_ok = false; break; }
+                    hold_q_new_order[new_idx] = hold_q_old_order[old_idx];
+                }
+                if (remap_ok) rl.hold_q_on_enter = hold_q_new_order;
+            }
+            if (!remap_ok)
+            {
+                rl.hold_q_on_enter = hold_q_old_order;
+                std::cout << LOGGER::WARNING << "[MjlabTracking] hold_q remap skipped, fallback to previous joint order." << std::endl;
+            }
+            rl.rl_blend_q_target = rl.hold_q_on_enter;
+            rl.rl_blend_dq_target.assign(num_dofs, 0.0f);
+
+            std::cout << LOGGER::INFO << "mjlab tracking horizon: "
+                      << rl.params.Get<int>("max_episode_length", 0) << " steps @ "
+                      << (1.0f / std::max(rl.GetPolicyStepTime(), 1e-6f)) << " Hz" << std::endl;
+
+            rl.now_state = *fsm_state;
+        }
+        catch (const std::exception& e)
+        {
+            std::cout << LOGGER::ERROR << "InitRL() failed: " << e.what() << std::endl;
+            rl.rl_init_done = false;
+            rl.fsm.RequestStateChange("RLFSMStatePassive");
+        }
+    }
+
+    void Run() override
+    {
+        if (!rl.rl_init_done) rl.rl_init_done = true;
+
+        float percent = 0.0f;
+        const int max_episode_length = rl.params.Get<int>("max_episode_length", -1);
+        if (max_episode_length > 1)
+        {
+            percent = std::clamp(static_cast<float>(rl.episode_length_buf) /
+                                 static_cast<float>(max_episode_length - 1), 0.0f, 1.0f);
+        }
+        LOGGER::PrintProgress(percent, rl.config_name);
+
+        RLControl();
+    }
+
+    void Exit() override
+    {
+        rl.rl_init_done = false;
+    }
+
+    std::string CheckChange() override
+    {
+        // 手动切换优先级最高，操作者随时可中断跟踪。
+        if (rl.control.current_keyboard == Input::Keyboard::P || rl.control.current_gamepad == Input::Gamepad::LB_X)
+        {
+            return "RLFSMStatePassive";
+        }
+        else if (rl.control.current_keyboard == Input::Keyboard::Num9 || rl.control.current_gamepad == Input::Gamepad::B)
+        {
+            return "RLFSMStateGetDown";
+        }
+        else if (rl.control.current_keyboard == Input::Keyboard::Num0 || rl.control.current_gamepad == Input::Gamepad::A)
+        {
+            return "RLFSMStateGetUp";
+        }
+        else if (rl.control.current_keyboard == Input::Keyboard::Num1 || rl.control.current_gamepad == Input::Gamepad::RB_DPadUp)
+        {
+            return "RLFSMStateRLLocomotion";
+        }
+        else if (rl.control.current_keyboard == Input::Keyboard::Num2 ||
+                 rl.control.current_keyboard == Input::Keyboard::Down ||
+                 rl.control.current_gamepad == Input::Gamepad::RB_DPadDown)
+        {
+            return "RLFSMStateRLWholeBodyTrackingDance";
+        }
+
+        // 播满整段 motion（episode_length_buf >= max_episode_length，即已用完 t=0..N-1）
+        // 后自动退出到 GetDown：继续停留会把相位 clamp 在末帧，属训练分布外。
+        const int max_episode_length = rl.params.Get<int>("max_episode_length", -1);
+        if (max_episode_length > 1 &&
+            static_cast<long long>(rl.episode_length_buf) >= static_cast<long long>(max_episode_length))
+        {
+            std::cout << "\n" << LOGGER::INFO
+                      << "[MjlabTracking] motion completed (ep_step=" << rl.episode_length_buf
+                      << ", max=" << max_episode_length << "), auto-exiting to GetDown." << std::endl;
+            return "RLFSMStateGetDown";
+        }
+        return state_name_;
+    }
+};
+
 } // namespace myrobot_fsm
 
 class MYROBOTFSMFactory : public FSMFactory
@@ -489,6 +656,8 @@ public:
             return std::make_shared<myrobot_fsm::RLFSMStateRLLocomotion>(rl);
         else if (state_name == "RLFSMStateRLWholeBodyTrackingDance")
             return std::make_shared<myrobot_fsm::RLFSMStateRLWholeBodyTrackingDance>(rl);
+        else if (state_name == "RLFSMStateRLMjlabTracking")
+            return std::make_shared<myrobot_fsm::RLFSMStateRLMjlabTracking>(rl);
         return nullptr;
     }
     std::string GetType() const override { return "myrobot"; }
@@ -499,7 +668,8 @@ public:
             "RLFSMStateGetUp",
             "RLFSMStateGetDown",
             "RLFSMStateRLLocomotion",
-            "RLFSMStateRLWholeBodyTrackingDance"
+            "RLFSMStateRLWholeBodyTrackingDance",
+            "RLFSMStateRLMjlabTracking"
         };
     }
     std::string GetInitialState() const override { return initial_state_; }
