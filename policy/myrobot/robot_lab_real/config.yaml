@@ -106,25 +106,15 @@ myrobot/robot_lab_real:
                   1.96, 1.96, 1.96, 1.96, 1.96, 1.96, 2.94,
                   2.94, 2.94, 2.94, 1.96, 1.96, 2.94, 2.94]
 
-#   default_dof_pos: [-0.3, -0.3, 0.0,           # hip pitch L/R, waist pitch
-#                     0.05, -0.05, 0.0,          # hip roll L/R, waist yaw
-#                     0.004, -0.004, 0.0,        # hip yaw L/R, head
-#                     0.0, 0.0,                  # shoulder pitch L/R
-#                     0.5, 0.5,                  # knee L/R
-#                     0.0, 0.0,                  # shoulder roll L/R
-#                     -0.2, -0.2,                # ankle pitch L/R
-#                     0.0, 0.0,                  # elbow L/R
-#                     -0.06, 0.06]               # ankle roll L/R
-  default_dof_pos: [-0.432, -0.432, 0.0,           # hip pitch L/R, waist pitch
+  default_dof_pos: [-0.3, -0.3, 0.0,           # hip pitch L/R, waist pitch
                     0.05, -0.05, 0.0,          # hip roll L/R, waist yaw
                     0.004, -0.004, 0.0,        # hip yaw L/R, head
                     0.0, 0.0,                  # shoulder pitch L/R
-                    0.793, 0.793,                  # knee L/R
+                    0.5, 0.5,                  # knee L/R
                     0.0, 0.0,                  # shoulder roll L/R
-                    -0.362, -0.362,                # ankle pitch L/R
+                    -0.2, -0.2,                # ankle pitch L/R
                     0.0, 0.0,                  # elbow L/R
                     -0.06, 0.06]               # ankle roll L/R
-
 
   joint_names: [left_hip_pitch, right_hip_pitch, waist_pitch,
                 left_hip_roll, right_hip_roll, waist_yaw,
