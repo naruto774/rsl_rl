@@ -35,24 +35,37 @@ myrobot/robot_lab_real:
   # 17: left_elbow          18: right_elbow
   # 19: left_ankle_roll     20: right_ankle_roll
 
-  default_dof_pos: [-0.3, -0.3, 0.0,           # hip pitch L/R, waist pitch
-                    0.05, -0.05, 0.0,          # hip roll L/R, waist yaw
-                    0.004, -0.004, 0.0,        # hip yaw L/R, head
-                    0.0, 0.0,                  # shoulder pitch L/R
-                    0.5, 0.5,                  # knee L/R
-                    0.0, 0.0,                  # shoulder roll L/R
-                    -0.2, -0.2,                # ankle pitch L/R
-                    0.0, 0.0,                  # elbow L/R
-                    -0.06, 0.06]               # ankle roll L/R
-#   default_dof_pos: [0.1507440358, 0.0461158566, 0.1927706748,   # hip pitch L/R, waist pitch
-#                     0.1219201833, -0.2156091630, -0.0125178732, # hip roll L/R, waist yaw
-#                     0.2559662759, -0.1999443918, 0.0,           # hip yaw L/R, head
-#                     -0.1231449172, -0.0586300083,               # shoulder pitch L/R
-#                     0.0819103271, 0.2212441415,                # knee L/R
-#                     0.2297214270, -0.2410776317,               # shoulder roll L/R
-#                     -0.1140388697, -0.1012539119,              # ankle pitch L/R
-#                     0.0464353338, -0.0598327368,                # elbow L/R
-#                     -0.0077413879, 0.1457020193]               # ankle roll L/R
+#   default_dof_pos: [-0.3, -0.3, 0.0,           # hip pitch L/R, waist pitch
+#                     0.05, -0.05, 0.0,          # hip roll L/R, waist yaw
+#                     0.004, -0.004, 0.0,        # hip yaw L/R, head
+#                     0.0, 0.0,                  # shoulder pitch L/R
+#                     0.5, 0.5,                  # knee L/R
+#                     0.0, 0.0,                  # shoulder roll L/R
+#                     -0.2, -0.2,                # ankle pitch L/R
+#                     0.0, 0.0,                  # elbow L/R
+#                     -0.06, 0.06]               # ankle roll L/R
+  # 对齐 mjlab env.yaml init_state.joint_pos（left 负 roll/yaw、正 ankle_roll；right 相反）。
+  default_dof_pos: [-0.432, -0.432, 0.0,           # hip pitch L/R, waist pitch
+                    -0.05, 0.05, 0.0,            # hip roll L/R, waist yaw
+                    -0.004, 0.004, 0.0,          # hip yaw L/R, head
+                    0.0, 0.0,                    # shoulder pitch L/R
+                    0.793, 0.793,                # knee L/R
+                    0.0, 0.0,                    # shoulder roll L/R
+                    -0.362, -0.362,              # ankle pitch L/R
+                    0.0, 0.0,                    # elbow L/R
+                    0.06, -0.06]                 # ankle roll L/R
+
+  # mjlab tabu.onnx motion 第 0 帧参考关节角（Isaac 顺序），GetUp 终点对齐策略首帧 command。
+  # 由 rollout.csv time_step=0 经 policy joint_mapping 反查 Isaac 索引得到。
+  getup_dof_pos: [-0.433, -0.431, 0.0,
+                  -0.047, 0.056, 0.0,
+                  0.022, -0.026, 0.0,
+                  0.0, 0.0,
+                  0.795, 0.792,
+                  0.0, 0.0,
+                  -0.362, -0.361,
+                  0.0, 0.0,
+                  0.051, -0.062]
 
                             #     "waist_pitch": 0.0407,
         #     "waist_yaw": 0.0594,

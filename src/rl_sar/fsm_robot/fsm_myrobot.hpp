@@ -69,7 +69,11 @@ public:
 
     void Run() override
     {
-        Interpolate(percent_getup, rl.now_state.motor_state.q, rl.params.Get<std::vector<float>>("default_dof_pos"), 0.05f, "Getting up", true);
+        const std::vector<float> getup_target =
+            rl.params.Has("getup_dof_pos")
+                ? rl.params.Get<std::vector<float>>("getup_dof_pos")
+                : rl.params.Get<std::vector<float>>("default_dof_pos");
+        Interpolate(percent_getup, rl.now_state.motor_state.q, getup_target, 0.05f, "Getting up", true);
     }
 
     void Exit() override {}
@@ -490,7 +494,7 @@ public:
 //   - 不依赖 MotionLoader / ampobs.csv / sim2sim init pose（mjlab 直接在 MuJoCo 训练）；
 //   - 观测/动作/频率全部由 mjlab/config.yaml 决定（114 维 / default_position / 50Hz）；
 //   - 参考动作来自 RL::BuildMjlabMotionTable() 缓存表，由 ComputeObservation 按 t 查表。
-// 使用方法：GetUp 到 default_dof_pos 后按 Num3 进入。
+// 使用方法：GetUp 到 getup_dof_pos（base.yaml，tabu motion 帧 0）后按 Num3 进入。
 // ---------------------------------------------------------------------------
 class RLFSMStateRLMjlabTracking : public RLFSMState
 {
